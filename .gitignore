@@ -92,7 +92,7 @@ iOSInjectionProject/
 # Secrets (keep sample files)
 *.plist
 !Secrets.sample.plist
-!Secrets.plist.example
+!Info.plist
 
 # macOS
 .DS_Store
