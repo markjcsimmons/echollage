@@ -1,0 +1,3019 @@
+import SwiftUI
+import AVFoundation
+import UIKit
+
+struct CollageEditorView: View {
+    @EnvironmentObject private var store: ProjectStore
+    @EnvironmentObject private var purchases: PurchaseManager
+
+    @Binding var project: Project
+    var onReset: (() -> Void)? = nil
+    var onSave: (() -> Void)? = nil
+    @State private var showPhotoPicker = false
+    @State private var showPaywall = false
+    @State private var showLayerPanel = false
+    @State private var showResetConfirmation = false
+    @State private var isDrawing = false
+    @State private var drawingData: Data = Data()
+    @State private var isExporting = false
+    @State private var exportProgress: Double = 0
+    @State private var exportedURL: URL?
+    @State private var hasCompletedCapture = false
+    @State private var showCapture = false
+    @State private var isEditingAudioName = false
+    @State private var editingAudioName = ""
+    @State private var showCamera = false
+    @State private var showImageSourcePicker = false
+    @State private var showDrawingToolbar = false
+    @State private var selectedTool: DrawingTool = .pen
+    @State private var strokeWidth: CGFloat = 8 // Default to "Medium"
+    @State private var strokeColor: Color = .white
+    @State private var refreshTrigger = UUID()
+    @State private var showFullToolset = false
+    @State private var selectedImageId: UUID? = nil
+    @State private var selectedTextId: UUID? = nil
+    @State private var showTextEditor = false
+    @State private var editingText = ""
+    @State private var editingTextColor: Color = .black
+    @State private var editingFontSize: Double = 32
+    @State private var showSplitOptions = false
+    @State private var tearPathPoints: [(point: CGPoint, pressure: Double)] = []
+    @State private var isTearingSelectedImage = false
+    @State private var showToolbarForSelectedImage = false
+    @State private var doneClickCount = 0 // Track Done button clicks (1 = ready to save)
+    @State private var isTearProcessing = false
+    @State private var lastTearTimestamp: Date = .distantPast // Prevent double-tear
+    @State private var isRemovingBackground = false // Track background removal processing
+    
+    // Canvas mode: images (edit images) or canvas (draw on global canvas)
+    enum CanvasMode {
+        case images  // Edit individual images
+        case canvas  // Draw on global canvas
+    }
+    @State private var canvasMode: CanvasMode = .images
+    
+    // Undo stack to support reverting complex actions like split/add/delete
+    enum UndoAction {
+        case split(original: ImageLayer, pieces: [ImageLayer])
+        case addImage(layer: ImageLayer)
+        case deleteImage(layer: ImageLayer, index: Int)
+        case erase(layerId: UUID, previousFileName: String?)
+        case draw(layerId: UUID, previousDrawingBase64: String?)
+        case addText(layer: TextLayer)
+        case deleteText(layer: TextLayer, index: Int)
+        case removeBackground(layerId: UUID, backupFileName: String)
+    }
+    @State private var undoStack: [UndoAction] = []
+    
+    // Track which phase of the flow we're in
+    enum EditorPhase {
+        case addingImages    // Show: Add Image + Done
+        case tearing         // Show: Tear + Done
+        case designing       // Show: Design + Done
+    }
+    @State private var currentPhase: EditorPhase = .addingImages
+    
+    // Unified metrics for all main action buttons to ensure perfect consistency
+    private enum MainButtonMetrics {
+        static let diameter: CGFloat = 60       // Main button size (50% smaller)
+        static let iconSize: CGFloat = 24       // Icon size
+        static let smallDiameter: CGFloat = 40  // Small side buttons (undo/done)
+        static let smallIconSize: CGFloat = 18
+        static let horizontalSpacing: CGFloat = 16
+    }
+
+    @StateObject private var recorder = AudioRecorder()
+    @StateObject private var player = AudioPlayer()
+    
+    // Store drawing history for undo (per-image)
+    @State private var drawingHistory: [Data] = []
+    @State private var currentDrawingImageId: UUID? = nil // Which image we're drawing on
+    @State private var drawingStateBeforeEdit: String? = nil // Capture state when starting to draw
+    
+    // Dynamic background based on project backgroundType
+    @ViewBuilder
+    private var backgroundView: some View {
+        switch project.backgroundType {
+        case .corkboard:
+            CorkboardBackground()
+        case .white:
+            Color.white
+        case .skyBlue:
+            Color(red: 0.53, green: 0.81, blue: 0.98) // Sky blue
+        case .black:
+            Color.black
+        }
+    }
+    
+    // Cycle through background types
+    private func cycleBackground() {
+        SoundEffectPlayer.shared.playClick()
+        withAnimation(.easeInOut(duration: 0.3)) {
+            switch project.backgroundType {
+            case .corkboard:
+                project.backgroundType = .white
+            case .white:
+                project.backgroundType = .skyBlue
+            case .skyBlue:
+                project.backgroundType = .black
+            case .black:
+                project.backgroundType = .corkboard
+            }
+        }
+        store.update(project)
+        print("🎨 Background changed to: \(project.backgroundType)")
+    }
+    
+    // Shared button label for Add Image (matches CaptureAudioView style exactly)
+    private var buttonLabel: some View {
+        VStack(spacing: 16) {
+            Circle()
+                .fill(Color.white)
+                .frame(width: SharedButtonMetrics.mainDiameter, height: SharedButtonMetrics.mainDiameter)
+                .shadow(color: Color.white.opacity(0.4), radius: 18)
+                .overlay(
+                    Circle()
+                        .stroke(Color.black, lineWidth: 1.5)
+                )
+                .overlay(
+                    Image(systemName: "photo")
+                        .font(.system(size: SharedButtonMetrics.mainIconSize, weight: .medium))
+                        .foregroundStyle(.black)
+                )
+            
+            Text("Add Images")
+                .font(.title2)
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
+        }
+        .fixedSize() // Prevent layout shifts
+    }
+
+    var body: some View {
+        ZStack {
+            // Background covering absolutely everything from edge to edge
+            backgroundView
+                .ignoresSafeArea(.all)
+                .onTapGesture {
+                    cycleBackground()
+                }
+            
+            // Canvas area (transparent, shows cork behind) - fills entire screen
+            canvasView
+                .ignoresSafeArea(.all)
+                
+            // Bottom toolbar with action buttons - 6x1 grid (always visible)
+            // Positioned at bottom with white background
+            VStack {
+                Spacer()
+                actionButtonsContent
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 12)
+                    .background(Color.white)
+            }
+            .ignoresSafeArea(edges: .bottom) // Extend white into bottom safe area
+            
+            // Centered "Add Images" button when no images yet (same position as SAVE button)
+            if project.imageLayers.isEmpty {
+                SharedButtonOverlay {
+                    buttonLabel
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            SoundEffectPlayer.shared.playClick()
+                            showImageSourcePicker = true
+                        }
+                }
+            }
+            
+            // Reset canvas button (top left)
+            VStack {
+                HStack {
+                    Button {
+                        SoundEffectPlayer.shared.playClick()
+                        showResetConfirmation = true
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise.circle")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Circle()
+                                    .fill(Color.red.opacity(0.8))
+                            )
+                    }
+                    .padding(.top, 60)
+                    .padding(.leading, 20)
+                    
+                    Spacer()
+                }
+                Spacer()
+            }
+            .zIndex(3000)
+            
+            // Mode toggle button (top right)
+            VStack {
+                HStack {
+                    Spacer()
+                    
+                    Button {
+                        SoundEffectPlayer.shared.playClick()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            canvasMode = canvasMode == .images ? .canvas : .images
+                            // When switching to canvas mode, deselect any image
+                            if canvasMode == .canvas {
+                                selectedImageId = nil
+                                showToolbarForSelectedImage = false
+                            }
+                        }
+                    } label: {
+                        Image(systemName: canvasMode == .images ? "photo.stack" : "paintpalette.fill")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Circle()
+                                    .fill(canvasMode == .canvas ? Color.orange.opacity(0.9) : Color.black.opacity(0.6))
+                                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                            )
+                    }
+                    .padding(.top, 60)
+                    .padding(.trailing, 20)
+                }
+                Spacer()
+            }
+            .zIndex(3000) // Above everything
+            
+            // Audio playback button (always on top, outside canvas)
+            if project.audioFileName != nil {
+                VStack {
+                    Button {
+                        print("🎵 Audio button tapped!")
+                        toggleAudioPlayback()
+                    } label: {
+                        VStack(spacing: 0) {
+                            // Always show just the icon
+                            Image(systemName: player.isPlaying ? "pause.circle.fill" : "waveform.circle.fill")
+                                .font(.system(size: 32))
+                                .foregroundStyle(.white)
+                            
+                            // Show metadata below only when playing
+                            if player.isPlaying, let metadata = project.musicMetadata {
+                                VStack(spacing: 2) {
+                                    Text(metadata.title)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .italic()
+                                        .foregroundStyle(.white)
+                                        .multilineTextAlignment(.center)
+                                        .lineLimit(1)
+                                    Text(metadata.artist)
+                                        .font(.system(size: 12, weight: .regular))
+                                        .italic()
+                                        .foregroundStyle(.white.opacity(0.8))
+                                        .multilineTextAlignment(.center)
+                                        .lineLimit(1)
+                                }
+                                .padding(.top, 4)
+                                .transition(.opacity)
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16)
+                                .fill(player.isPlaying ? Color.orange.opacity(0.9) : Color.black.opacity(0.7))
+                                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+                        )
+                        .contentShape(Rectangle()) // Make entire area tappable
+                    }
+                    .buttonStyle(.plain) // Remove default button styling that might block hits
+                    .padding(.top, 60)
+                    Spacer()
+                }
+                .allowsHitTesting(true) // Ensure button can receive taps
+                .zIndex(3000) // Above everything including big button
+            }
+            
+            // Drawing toolbar overlay
+            if showDrawingToolbar {
+                DrawingToolbar(
+                    isDrawing: $isDrawing,
+                    selectedTool: $selectedTool,
+                    strokeWidth: $strokeWidth,
+                    strokeColor: $strokeColor,
+                    drawingData: $drawingData,
+                    onUndoDrawing: {
+                        // Undo drawing by restoring previous state
+                        print("🎨 Undo drawing clicked - history count: \(drawingHistory.count)")
+                        print("🎨 Current drawing data size: \(drawingData.count) bytes")
+                        
+                        if drawingHistory.count > 1 {
+                            print("🎨 Removing last state from history")
+                            drawingHistory.removeLast() // Remove current
+                            let previousData = drawingHistory.last ?? Data()
+                            drawingData = previousData
+                            print("🎨 Restored to previous state, size: \(previousData.count) bytes, remaining history: \(drawingHistory.count)")
+                        } else if drawingHistory.count == 1 {
+                            // Clear everything if only one state
+                            print("🎨 Only one state in history, clearing all drawing")
+                            drawingData = Data()
+                            drawingHistory = [Data()]
+                            print("🎨 Cleared all drawing")
+                        } else {
+                            print("⚠️ No history to undo!")
+                        }
+                    },
+                    onClose: {
+                        print("🎨 ✅ Drawing toolbar Done clicked")
+                        print("   currentDrawingImageId: \(String(describing: currentDrawingImageId))")
+                        print("   drawingData size: \(drawingData.count)")
+                        
+                        // Save drawing data to the image layer OR global canvas
+                        if let imageId = currentDrawingImageId,
+                           let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
+                            // Drawing on a specific image
+                            let previousDrawingBase64 = project.imageLayers[idx].drawingDataBase64
+                            
+                            let base64 = drawingData.base64EncodedString()
+                            let newBase64 = base64.isEmpty ? nil : base64
+                            
+                            print("🎨 Image drawing: previous=\(previousDrawingBase64?.prefix(20) ?? "nil"), new=\(newBase64?.prefix(20) ?? "nil")")
+                            
+                            // Only add to undo stack if drawing actually changed
+                            if previousDrawingBase64 != newBase64 {
+                                undoStack.append(.draw(layerId: imageId, previousDrawingBase64: previousDrawingBase64))
+                                print("🎨 ✅ Added image drawing to undo stack")
+                            } else {
+                                print("⚠️ Image drawing unchanged")
+                            }
+                            
+                            project.imageLayers[idx].drawingDataBase64 = newBase64
+                            store.update(project)
+                            print("🎨 Saved drawing to image: \(imageId), data size: \(drawingData.count) bytes")
+                        } else {
+                            // Drawing on global canvas (currentDrawingImageId is nil)
+                            print("🎨 Saving global canvas drawing")
+                            
+                            // Use the captured state from BEFORE we started drawing
+                            let previousDrawingBase64 = drawingStateBeforeEdit
+                            
+                            let base64 = drawingData.base64EncodedString()
+                            let newBase64 = base64.isEmpty ? nil : base64
+                            
+                            print("🎨 Canvas drawing: previous=\(previousDrawingBase64?.prefix(20) ?? "nil"), new=\(newBase64?.prefix(20) ?? "nil")")
+                            
+                            // Add to undo stack if drawing changed
+                            if previousDrawingBase64 != newBase64 {
+                                let dummyId = UUID()
+                                undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
+                                print("🎨 ✅ Added global canvas drawing to undo stack (layerId: \(dummyId))")
+                                print("🔄 Undo stack now has \(undoStack.count) items")
+                            } else {
+                                print("⚠️ Drawing unchanged, not adding to undo stack")
+                            }
+                            
+                            project.drawingDataBase64 = newBase64
+                            store.update(project)
+                            print("🎨 Saved drawing to global canvas, data size: \(drawingData.count) bytes")
+                            
+                            // Clear the captured state
+                            drawingStateBeforeEdit = nil
+                        }
+                        
+                        currentDrawingImageId = nil
+                        showDrawingToolbar = false
+                        isDrawing = false
+                        selectedTool = .pen // Reset tool to prevent continued erasing
+                    }
+                )
+                .transition(.move(edge: .bottom))
+            }
+        }
+        .ignoresSafeArea(.all, edges: .all)
+        .navigationBarHidden(true)
+        .sheet(isPresented: $showPhotoPicker) {
+            PhotoPicker(selectionLimit: 0) { images in
+                addImages(images)
+            }
+        }
+        .sheet(isPresented: $showCamera) {
+            CameraPicker { image in
+                if let image = image {
+                    addImages([image])
+                }
+            }
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView()
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showLayerPanel) {
+            LayerPanel(project: $project) {
+                store.update(project)
+            }
+        }
+        .alert("Reset Moment?", isPresented: $showResetConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                resetCanvas()
+            }
+        } message: {
+            Text("This will delete everything and return you to the home screen to start a new moment.")
+        }
+        .overlay(
+            Group {
+                if showTextEditor {
+                    TextEditorOverlay(
+                        text: $editingText,
+                        textColor: $editingTextColor,
+                        fontSize: $editingFontSize,
+                        onDone: {
+                            if let textId = selectedTextId,
+                               let idx = project.textLayers.firstIndex(where: { $0.id == textId }) {
+                                // Only save if text is not empty
+                                if !editingText.trimmingCharacters(in: .whitespaces).isEmpty {
+                                project.textLayers[idx].text = editingText
+                                project.textLayers[idx].hexColor = editingTextColor.toHex() ?? "#000000"
+                                    project.textLayers[idx].fontSize = editingFontSize
+                                print("✏️ Updated text to: \(editingText)")
+                                } else {
+                                    // Remove empty text layer and record undo
+                                    let layer = project.textLayers[idx]
+                                    project.textLayers.remove(at: idx)
+                                    undoStack.append(.deleteText(layer: layer, index: idx))
+                                    print("✏️ Removed empty text layer")
+                                }
+                            }
+                            
+                            selectedTextId = nil
+                            showTextEditor = false
+                            
+                            // Batch store update after UI dismisses
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                store.update(project)
+                            }
+                        },
+                        onCancel: {
+                            // Remove text layer if it was just created and user cancelled
+                            if let textId = selectedTextId,
+                               let idx = project.textLayers.firstIndex(where: { $0.id == textId }),
+                               let layer = project.textLayers.first(where: { $0.id == textId }),
+                               layer.text.isEmpty {
+                                project.textLayers.remove(at: idx)
+                                // Don't add to undo stack - the addText action is already there
+                                // and will be undone if needed
+                                if let undoIdx = undoStack.lastIndex(where: {
+                                    if case .addText(let addedLayer) = $0, addedLayer.id == textId {
+                                        return true
+                                    }
+                                    return false
+                                }) {
+                                    undoStack.remove(at: undoIdx)
+                                }
+                                store.update(project)
+                                print("✏️ Cancelled - removed empty text layer")
+                            }
+                            selectedTextId = nil
+                            showTextEditor = false
+                        }
+                    )
+                    .transition(.move(edge: .bottom))
+                    .zIndex(10000)
+                }
+            }
+        )
+        .onAppear {
+            if let base64 = project.drawingDataBase64, let data = Data(base64Encoded: base64) {
+                drawingData = data
+            }
+            hasCompletedCapture = true
+        }
+        .onChange(of: drawingData) { newValue in
+            project.drawingDataBase64 = newValue.base64EncodedString()
+            store.update(project)
+        }
+        .fullScreenCover(isPresented: $showCapture) {
+            CaptureAudioView(project: $project) {
+                hasCompletedCapture = true
+                showCapture = false
+            }
+            .environmentObject(store)
+        }
+        .alert("Name Your Sound", isPresented: $isEditingAudioName) {
+            TextField("Sound name", text: $editingAudioName)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                project.customAudioName = editingAudioName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if project.customAudioName?.isEmpty == true {
+                    project.customAudioName = nil
+                }
+                store.update(project)
+            }
+        } message: {
+            Text("Give this sound a custom name")
+        }
+        .confirmationDialog("Add Image", isPresented: $showImageSourcePicker) {
+            Button("Take Photo") {
+                showCamera = true
+            }
+            Button("Choose from Photos") {
+                showPhotoPicker = true
+            }
+            Button("Cancel", role: .cancel) { }
+        }
+    }
+    
+    // Cache loaded images to avoid disk I/O every frame
+    @State private var imageCache: [String: UIImage] = [:]
+    private let maxCacheSize = 10 // Maximum images to keep in memory
+    
+    private func loadImage(fileName: String) -> UIImage? {
+        // Check cache first (using non-mutating access for performance)
+        if let cached = imageCache[fileName] {
+            return cached
+        }
+        
+        guard let url = assetURL(for: fileName) else { return nil }
+        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+        
+        // Downscale aggressively for memory
+        let maxDimension: CGFloat = 1000 // Reduced for better performance
+        let downsized = downscaleImage(image, maxDimension: maxDimension)
+        
+        // Update cache on main thread to avoid race conditions
+        DispatchQueue.main.async {
+            // Cache with limit
+            if self.imageCache.count >= self.maxCacheSize {
+                // Remove oldest (first) entry
+                if let firstKey = self.imageCache.keys.first {
+                    self.imageCache.removeValue(forKey: firstKey)
+                }
+            }
+            self.imageCache[fileName] = downsized
+        }
+        
+        return downsized
+    }
+    
+    private var canvasView: some View {
+        GeometryReader { geometry in
+            let canvasSize = geometry.size
+            ZStack {
+                // Always transparent to show corkboard background
+                Color.clear
+                
+                ForEach(project.imageLayers.sorted(by: { $0.zIndex < $1.zIndex })) { layer in
+                    if let ui = loadImage(fileName: layer.imageFileName),
+                       let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
+                        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+
+                        // Keep same view structure always, just toggle erase mode
+                        let isErasing = selectedTool == .erase && selectedImageId == layer.id
+                        
+                        ZStack {
+                            // ALWAYS show the ErasableImageView with consistent identity
+                            ErasableImageView(
+                                image: ui,
+                                erasedImageFileName: $project.imageLayers[idx].erasedImageFileName,
+                                brushSize: strokeWidth * 3,
+                                projectId: project.id,
+                                store: store,
+                                isEraseMode: isErasing,
+                                onImageErased: { fileName in
+                                    project.imageLayers[idx].erasedImageFileName = fileName
+                                    store.update(project)
+                                }
+                            )
+                            .frame(width: baseSize.width, height: baseSize.height)
+                            .id("erasable-\(layer.id)") // Stable identity
+                            
+                            // Drawing overlay (bound to this image)
+                            if let drawingBase64 = layer.drawingDataBase64,
+                               let drawingDataForImage = Data(base64Encoded: drawingBase64) {
+                                ImageBoundDrawingView(
+                                    drawingData: drawingDataForImage,
+                                    imageSize: baseSize,
+                                    isInteractive: false
+                                )
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .allowsHitTesting(false)
+                            }
+                            
+                            // Selection border
+                            if selectedImageId == layer.id {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.blue, lineWidth: 3)
+                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .allowsHitTesting(false)
+                            }
+                            
+                            // Gesture overlay (only when NOT erasing)
+                            if !isErasing {
+                                Group {
+                                    if selectedTool == .tear {
+                                        // Tear mode: only tap to select, no transform gestures
+                                        Color.clear
+                                            .frame(width: baseSize.width, height: baseSize.height)
+                                            .contentShape(Rectangle())
+                                            .onTapGesture {
+                                                selectedImageId = layer.id
+                                            }
+                                            .zIndex(10)
+                                    } else {
+                                        // Normal mode: transform gestures + tap gestures
+                                        Color.clear
+                                            .frame(width: baseSize.width, height: baseSize.height)
+                                            .contentShape(Rectangle())
+                                            .modifier(TransformModifier(
+                                                transform: $project.imageLayers[idx].transform,
+                                                isEnabled: !isDrawing, // Disable drag/pinch/rotate when drawing
+                                                onGestureEnd: {
+                                                    // Debounce updates - only save after gesture completes
+                                                    // Don't write to disk during drag for smoother performance
+                                                }
+                                            ))
+                                            .simultaneousGesture(
+                                                // Triple tap - highest priority
+                                                TapGesture(count: 3)
+                                                    .onEnded {
+                                                        print("🗑️ Triple tap detected!")
+                                                        // Play three clicks for triple tap
+                                                        SoundEffectPlayer.shared.playClick()
+                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                                            SoundEffectPlayer.shared.playClick()
+                                                        }
+                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+                                                            SoundEffectPlayer.shared.playClick()
+                                                        }
+                                                        // Delay deletion to avoid gesture conflicts
+                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                                            self.deleteImage(layer: layer)
+                                                        }
+                                                    }
+                                            )
+                                            .simultaneousGesture(
+                                                // Double tap
+                                                TapGesture(count: 2)
+                                                    .onEnded {
+                                                        print("🔼 Double tap detected on layer: \(layer.id)")
+                                                        // Play two clicks for double tap
+                                                        SoundEffectPlayer.shared.playClick()
+                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                                            SoundEffectPlayer.shared.playClick()
+                                                        }
+                                                        bringToFront(layer: layer)
+                                                    }
+                                            )
+                                            .simultaneousGesture(
+                                                // Single tap
+                                                TapGesture(count: 1)
+                                                    .onEnded {
+                                                        print("👆 Single tap detected!")
+                                                        // Play click sound when selecting image
+                                                        SoundEffectPlayer.shared.playClick()
+                                                        // Single tap selects image and shows toolbar
+                                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                                            selectedImageId = layer.id
+                                                            showToolbarForSelectedImage = true
+                                                        }
+                                                        // Automatically remove background if image contains a person
+                                                        autoRemoveBackground(for: layer.id)
+                                                    }
+                                            )
+                                            .simultaneousGesture(
+                                                LongPressGesture(minimumDuration: 0.5)
+                                                    .onEnded { _ in
+                                                        print("⏱️ Long press detected!")
+                                                        sendToBack(layer: layer)
+                                                    }
+                                            )
+                                            .zIndex(isDrawing ? 1001 : 10) // Above PencilKit when drawing
+                                    }
+                                }
+                            }
+                        }
+                        .scaleEffect(project.imageLayers[idx].transform.scale)
+                        .rotationEffect(.radians(project.imageLayers[idx].transform.rotation))
+                        .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
+                        .opacity(canvasMode == .canvas && isDrawing && currentDrawingImageId == nil ? 0.6 : 1.0) // Dim only when drawing on global canvas (helps see paint)
+                        .zIndex(Double(layer.zIndex))
+                        .id("\(layer.id)-\(layer.erasedImageFileName ?? "orig")")
+                    }
+                }
+                
+                ForEach(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex })) { layer in
+                    TransformableText(
+                        text: layer.text,
+                        fontName: layer.fontName,
+                        fontSize: layer.fontSize,
+                        color: Color(hex: layer.hexColor),
+                        transform: layer.transform,
+                        isSelected: selectedTextId == layer.id
+                    ) { newTransform in
+                        if let idx = project.textLayers.firstIndex(where: { $0.id == layer.id }) {
+                            project.textLayers[idx].transform = newTransform
+                            store.update(project)
+                        }
+                    } onTap: {
+                        guard !showTextEditor else { return } // Prevent multiple taps
+                        SoundEffectPlayer.shared.playClick()
+                        selectedTextId = layer.id
+                        editingText = layer.text
+                        editingTextColor = Color(hex: layer.hexColor)
+                        editingFontSize = layer.fontSize
+                        
+                        // Defer showing editor for smoother performance
+                        DispatchQueue.main.async {
+                            self.showTextEditor = true
+                        }
+                        print("✏️ Showing text editor for: \(layer.id)")
+                    } onTextChange: { _ in
+                        // Not used in simplified version
+                    }
+                    .zIndex(2000 + Double(layer.zIndex)) // High zIndex to render on top, but only captures touches on actual text
+                }
+                
+                // Show saved global canvas drawing (when not actively drawing)
+                if !isDrawing, let base64 = project.drawingDataBase64,
+                   let drawingDataForCanvas = Data(base64Encoded: base64) {
+                    ImageBoundDrawingView(
+                        drawingData: drawingDataForCanvas,
+                        imageSize: canvasSize,
+                        isInteractive: false
+                    )
+                    .frame(width: canvasSize.width, height: canvasSize.height)
+                    .allowsHitTesting(false)
+                    .zIndex(500) // Above images, below active drawing
+                }
+                
+                // PencilKit drawing layer - positioned over selected image OR full canvas
+                if isDrawing {
+                    if let imageId = currentDrawingImageId,
+                       let layer = project.imageLayers.first(where: { $0.id == imageId }),
+                       let ui = loadImage(fileName: layer.imageFileName) {
+                        // IMAGE-SPECIFIC DRAWING
+                        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+                        
+                        PencilKitView(
+                            drawingData: $drawingData,
+                            isDrawingEnabled: true,
+                            isEraseMode: false,
+                            strokeColor: strokeColor,
+                            strokeWidth: strokeWidth,
+                            onDrawingChanged: { newData in
+                                print("🎨 Drawing changed, data size: \(newData.count) bytes")
+                                if !drawingHistory.isEmpty && drawingHistory.last == newData {
+                                    print("🎨 Skipping duplicate")
+                                    return
+                                }
+                                drawingHistory.append(newData)
+                                print("🎨 Added to history, total states: \(drawingHistory.count)")
+                            }
+                        )
+                        .id("pencilkit-image-\(imageId)-\(drawingData.count)")
+                        .frame(width: baseSize.width, height: baseSize.height)
+                        .scaleEffect(layer.transform.scale)
+                        .rotationEffect(.radians(layer.transform.rotation))
+                        .offset(x: layer.transform.x, y: layer.transform.y)
+                        .allowsHitTesting(true)
+                        .zIndex(1000)
+                    } else {
+                        // GLOBAL CANVAS DRAWING
+                        PencilKitView(
+                            drawingData: $drawingData,
+                            isDrawingEnabled: true,
+                            isEraseMode: false,
+                            strokeColor: strokeColor,
+                            strokeWidth: strokeWidth,
+                            onDrawingChanged: { newData in
+                                print("🎨 Global canvas drawing changed, data size: \(newData.count) bytes")
+                                if !drawingHistory.isEmpty && drawingHistory.last == newData {
+                                    print("🎨 Skipping duplicate")
+                                    return
+                                }
+                                drawingHistory.append(newData)
+                                print("🎨 Added to history, total states: \(drawingHistory.count)")
+                            }
+                        )
+                        .id("pencilkit-canvas-\(drawingData.count)")
+                        .frame(width: canvasSize.width, height: canvasSize.height)
+                        .allowsHitTesting(true)
+                        .zIndex(1000)
+                    }
+                }
+                
+                // Tear gesture overlay when image is selected - with pressure sensitivity
+                       if selectedTool == .tear && selectedImageId != nil && !isTearProcessing {
+                           PressureSensitiveTearOverlay(
+                               tearPathPoints: $tearPathPoints,
+                               isTearing: $isTearingSelectedImage,
+                               canvasSize: canvasSize,
+                               onTearComplete: { performTearOnSelectedImage(canvasSize: canvasSize) },
+                               isActive: selectedImageId != nil && project.imageLayers.contains(where: { $0.id == selectedImageId }) && !isTearProcessing
+                           )
+                           .zIndex(1000)
+                       }
+                       
+                       // Erase gesture overlay when image is selected and erase tool active
+                       if selectedTool == .erase && selectedImageId != nil {
+                           PressureSensitiveEraseOverlay(
+                               selectedImageId: selectedImageId,
+                               project: $project,
+                               undoStack: $undoStack,
+                               store: store,
+                               brushSize: strokeWidth * 3
+                           )
+                           .frame(width: canvasSize.width, height: canvasSize.height)
+                           .zIndex(1000)
+                       }
+                       
+                       // Visual debug indicator for tear processing
+                       if isTearProcessing {
+                           VStack {
+                               Text("Processing tear...")
+                                   .font(.headline)
+                                   .foregroundColor(.white)
+                                   .padding()
+                                   .background(Color.red.opacity(0.8))
+                                   .cornerRadius(10)
+                               Spacer()
+                           }
+                           .zIndex(2000)
+                       }
+                       
+                       
+                   }
+                   .frame(width: canvasSize.width, height: canvasSize.height)
+               }
+           }
+    
+    // Action buttons content - changes based on canvas mode
+    private var actionButtonsContent: some View {
+        HStack(spacing: 0) {
+            if canvasMode == .images {
+                // IMAGE MODE: Full image editing tools
+                imageModeToolbars()
+            } else {
+                // CANVAS MODE: Simplified canvas drawing tools
+                canvasModeToolbars()
+            }
+        }
+    }
+    
+    // Image mode toolbar (6 buttons)
+    @ViewBuilder
+    private func imageModeToolbars() -> some View {
+            // 1. Undo (disabled when drawing - use drawing toolbar undo instead)
+            ToolbarGridButton(
+                icon: "arrow.uturn.backward",
+                isDisabled: undoStack.isEmpty || isDrawing
+            ) {
+                undoLastAction()
+            }
+            
+            // 2. Add Image (disabled when big button showing OR when 10 images)
+            ToolbarGridButton(
+                icon: "photo",
+                isDisabled: project.imageLayers.isEmpty || project.imageLayers.count >= 10,
+                shouldThrob: false // No throb, big button is visible
+            ) {
+                showImageSourcePicker = true
+                selectedTool = .pen
+                showDrawingToolbar = false
+            }
+            
+            // 3. Tear (always visible, disabled if no image selected) - throb if image selected and no tear/erase/design used yet
+            ToolbarGridButton(
+                icon: "scissors",
+                isDisabled: !showToolbarForSelectedImage,
+                shouldThrob: showToolbarForSelectedImage && doneClickCount == 0
+            ) {
+                selectedTool = .tear
+                showDrawingToolbar = false
+            }
+            
+            // 4. Erase (always visible, disabled if no image selected)
+            ToolbarGridButton(
+                icon: "eraser",
+                isDisabled: !showToolbarForSelectedImage
+            ) {
+                print("🧹 Erase button clicked. Selected image: \(String(describing: selectedImageId))")
+                selectedTool = .erase
+                showDrawingToolbar = false
+                print("🧹 After setting tool. Selected image: \(String(describing: selectedImageId))")
+            }
+            
+            // 5. Design/Draw (always visible, disabled if no image selected)
+            ToolbarGridButton(
+                icon: "paintbrush",
+                isDisabled: !showToolbarForSelectedImage
+            ) {
+                guard let imageId = selectedImageId,
+                      let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) else { return }
+                
+                selectedTool = .pen
+                showDrawingToolbar = true
+                isDrawing = true
+                currentDrawingImageId = imageId
+                
+                // Load existing drawing for this image
+                if let base64 = project.imageLayers[idx].drawingDataBase64,
+                   let data = Data(base64Encoded: base64) {
+                    drawingData = data
+                    drawingHistory = [data]
+                } else {
+                    // Start fresh
+                    drawingData = Data()
+                    drawingHistory = [Data()]
+                }
+                
+                print("🎨 Started drawing on image: \(imageId)")
+            }
+            
+            // 6. Done / Save
+            if doneClickCount >= 1 {
+                // Show bigger green SAVE button
+                Button {
+                    store.update(project)
+                    onSave?()
+                    doneClickCount = 0 // Reset for next project
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 60, height: 60)
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+            } else {
+                // Regular Done button
+            ToolbarGridButton(icon: "checkmark", isAccent: true) {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                    // Close drawing toolbar if open
+                    if showDrawingToolbar {
+                        showDrawingToolbar = false
+                        isDrawing = false
+                        
+                        // Save drawing data to the image layer
+                        if let imageId = currentDrawingImageId,
+                           let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
+                            let base64 = drawingData.base64EncodedString()
+                            project.imageLayers[idx].drawingDataBase64 = base64.isEmpty ? nil : base64
+                            store.update(project)
+                            print("🎨 Saved drawing to image: \(imageId)")
+                        }
+                        currentDrawingImageId = nil
+                    }
+                    
+                    // Deactivate any active tool
+                    selectedTool = .pen // Reset to default (non-active) tool
+                    
+                    // Clear image selection and tool visibility
+                    selectedImageId = nil
+                    showToolbarForSelectedImage = false
+                        
+                        // Increment done click count
+                        doneClickCount += 1
+                    
+                    // Also ensure erase mode is disabled
+                    isDrawing = false
+                    }
+                }
+            }
+    }
+    
+    // Canvas mode toolbar (4 buttons - simplified)
+    @ViewBuilder
+    private func canvasModeToolbars() -> some View {
+        // 1. Undo (use regular undo stack - works for text, drawing, etc)
+        ToolbarGridButton(
+            icon: "arrow.uturn.backward",
+            isDisabled: undoStack.isEmpty
+        ) {
+            undoLastAction()
+        }
+        
+        // 2. Design (draw on global canvas)
+        ToolbarGridButton(
+            icon: "paintbrush",
+            isDisabled: false
+        ) {
+            selectedTool = .pen
+            showDrawingToolbar = true
+            isDrawing = true
+            currentDrawingImageId = nil // Draw on global canvas
+            
+            // CAPTURE THE STATE BEFORE DRAWING STARTS
+            drawingStateBeforeEdit = project.drawingDataBase64
+            print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
+            
+            // Load existing global drawing
+            if let base64 = project.drawingDataBase64,
+               let data = Data(base64Encoded: base64) {
+                drawingData = data
+                drawingHistory = [data]
+            } else {
+                // Start fresh
+                drawingData = Data()
+                drawingHistory = [Data()]
+            }
+            
+            print("🎨 Started drawing on global canvas")
+        }
+        
+        // 3. Text
+        ToolbarGridButton(
+            icon: "textformat",
+            isDisabled: false
+        ) {
+            addTextLayer()
+        }
+        
+        // 4. Done / Save
+        if doneClickCount >= 1 {
+            // Show bigger green SAVE button
+            Button {
+                store.update(project)
+                onSave?()
+                doneClickCount = 0 // Reset for next project
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 60, height: 60)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+        } else {
+            // Regular Done button
+        ToolbarGridButton(icon: "checkmark", isAccent: true) {
+                print("✅ Done button clicked in canvas mode")
+                print("   showDrawingToolbar: \(showDrawingToolbar)")
+                print("   isDrawing: \(isDrawing)")
+                print("   currentDrawingImageId: \(String(describing: currentDrawingImageId))")
+                print("   drawingData size: \(drawingData.count)")
+                print("   project.drawingDataBase64: \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                    // Save drawing even if toolbar is closed (user may have closed it already)
+                    let previousDrawingBase64 = project.drawingDataBase64
+                    let base64 = drawingData.base64EncodedString()
+                    let newBase64 = base64.isEmpty ? nil : base64
+                    
+                    // Add to undo stack if there's ANY drawing data (new or changed)
+                    if newBase64 != nil && previousDrawingBase64 != newBase64 {
+                        let dummyId = UUID()
+                        undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
+                        print("🎨 Added global canvas drawing to undo stack (layerId: \(dummyId))")
+                        print("🔄 Undo stack now has \(undoStack.count) items")
+                    } else if newBase64 == nil {
+                        print("⚠️ No drawing data to save")
+                    } else {
+                        print("⚠️ Drawing unchanged, not adding to undo stack")
+                    }
+                    
+                    // Save the drawing
+                    if newBase64 != nil {
+                        project.drawingDataBase64 = newBase64
+                        store.update(project)
+                        print("🎨 Saved drawing to global canvas")
+                    }
+                    
+                // Close drawing toolbar if open
+                if showDrawingToolbar {
+                    showDrawingToolbar = false
+                    isDrawing = false
+                    currentDrawingImageId = nil
+                }
+                
+                // Reset tool
+                selectedTool = .pen
+                isDrawing = false
+                    
+                    // Increment done click count
+                    doneClickCount += 1
+                }
+            }
+        }
+    }
+    
+    // Individual grid button with 3D shadow effect
+    private struct ToolbarGridButton: View {
+        let icon: String
+        var isDisabled: Bool = false
+        var isAccent: Bool = false
+        var shouldThrob: Bool = false // Suggest this button to user
+        let action: () -> Void
+        
+        @State private var throbScale: CGFloat = 1.0
+        @State private var isPressed: Bool = false
+        
+        var body: some View {
+            Button(action: action) {
+                ZStack {
+                    // Bottom shadow layer (3D depth)
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.black.opacity(0.3))
+                        .frame(width: 50, height: 50)
+                        .offset(y: isPressed ? 1 : 3)
+                    
+                    // Main button
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.98),
+                                    Color.white.opacity(0.92)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                        .frame(width: 50, height: 50)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.8),
+                                            Color.black.opacity(0.2)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 1
+                                )
+                        )
+                        .shadow(color: Color.black.opacity(0.15), radius: 2, x: 0, y: 1)
+                        .offset(y: isPressed ? 2 : 0)
+                    
+                    // Icon
+                    Image(systemName: icon)
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(.black)
+                        .offset(y: isPressed ? 2 : 0)
+                }
+            }
+            .buttonStyle(PressableButtonStyle(isPressed: $isPressed))
+            .disabled(isDisabled || icon.isEmpty)
+            .opacity(isDisabled || icon.isEmpty ? 0.3 : 1.0)
+        }
+    }
+    
+    // Custom button style that tracks press state for 3D effect
+    private struct PressableButtonStyle: ButtonStyle {
+        @Binding var isPressed: Bool
+        
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .onChange(of: configuration.isPressed) { newValue in
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        isPressed = newValue
+                    }
+                    if newValue {
+                        SoundEffectPlayer.shared.playClick()
+                    }
+                }
+        }
+    }
+    
+    // Plain button style that prevents any movement or animation
+    private struct PlainScaleButtonStyle: ButtonStyle {
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                // No scale, no animation - completely static
+        }
+    }
+    
+    // MARK: - Pressure Sensitive Erase Overlay
+    private struct PressureSensitiveEraseOverlay: UIViewRepresentable {
+        let selectedImageId: UUID?
+        @Binding var project: Project
+        @Binding var undoStack: [UndoAction]
+        let store: ProjectStore
+        let brushSize: CGFloat
+        
+        func makeUIView(context: Context) -> PressureEraseView {
+            let view = PressureEraseView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = true
+            return view
+        }
+        
+        func updateUIView(_ uiView: PressureEraseView, context: Context) {
+            uiView.selectedImageId = selectedImageId
+            uiView.project = project
+            uiView.store = store
+            uiView.brushSize = brushSize
+            uiView.onEraseComplete = { updatedProject, undoAction in
+                DispatchQueue.main.async {
+                    self.project = updatedProject
+                    if let action = undoAction {
+                        self.undoStack.append(action)
+                    }
+                }
+            }
+        }
+    }
+    
+    // UIView that captures pressure-sensitive erase gestures
+    class PressureEraseView: UIView {
+        var selectedImageId: UUID?
+        var project: Project!
+        var store: ProjectStore!
+        var brushSize: CGFloat = 20
+        var onEraseComplete: ((Project, CollageEditorView.UndoAction?) -> Void)?
+        
+        private var erasePoints: [(point: CGPoint, pressure: Double)] = []
+        private var feedbackLayer: CAShapeLayer?
+        
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard let touch = touches.first else { return }
+            let location = touch.location(in: self)
+            
+            let pressure = getPressure(from: touch)
+            erasePoints = [(point: location, pressure: pressure)]
+            
+            print("🧹 Erase overlay touchesBegan at \(location), pressure: \(pressure)")
+            
+            // Create visual feedback layer
+            feedbackLayer?.removeFromSuperlayer()
+            let layer = CAShapeLayer()
+            layer.strokeColor = UIColor.red.withAlphaComponent(0.5).cgColor
+            layer.fillColor = UIColor.clear.cgColor
+            layer.lineCap = .round
+            layer.lineJoin = .round
+            self.layer.addSublayer(layer)
+            feedbackLayer = layer
+            
+            updateFeedbackPath()
+        }
+        
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard let touch = touches.first else { return }
+            let location = touch.location(in: self)
+            
+            let pressure = getPressure(from: touch)
+            erasePoints.append((point: location, pressure: pressure))
+            
+            updateFeedbackPath()
+        }
+        
+        private func updateFeedbackPath() {
+            guard erasePoints.count >= 2 else { return }
+            
+            let path = UIBezierPath()
+            path.move(to: erasePoints[0].point)
+            
+            for data in erasePoints.dropFirst() {
+                path.addLine(to: data.point)
+            }
+            
+            // Average pressure for line width
+            let avgPressure = erasePoints.map { $0.pressure }.reduce(0, +) / Double(erasePoints.count)
+            let lineWidth = CGFloat(brushSize * (0.5 + avgPressure * 2.5))
+            
+            feedbackLayer?.path = path.cgPath
+            feedbackLayer?.lineWidth = lineWidth
+        }
+        
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            print("🧹 Erase overlay touchesEnded with \(erasePoints.count) points")
+            
+            // Remove visual feedback immediately
+            feedbackLayer?.removeFromSuperlayer()
+            feedbackLayer = nil
+            
+            guard erasePoints.count >= 2,
+                  let selectedId = selectedImageId,
+                  let idx = project.imageLayers.firstIndex(where: { $0.id == selectedId }) else {
+                print("🧹 Not enough points or no selected image")
+                erasePoints = []
+                return
+            }
+            
+            print("🧹 Applying erase to image at index \(idx)")
+            
+            // Load the current image and capture previous state for undo
+            let layer = project.imageLayers[idx]
+            let previousErasedFileName = layer.erasedImageFileName // Capture for undo
+            let imageURL = store.urlForProjectAsset(projectId: project.id, fileName: layer.erasedImageFileName ?? layer.imageFileName)
+            guard let currentImage = UIImage(contentsOfFile: imageURL.path) else {
+                print("🧹 Failed to load image from \(imageURL.path)")
+                erasePoints = []
+                return
+            }
+            
+            // Calculate image position on canvas (same as tear tool)
+            let canvasSize = self.bounds.size
+            let baseSize = self.calculateBaseImageSize(for: currentImage, canvasSize: canvasSize)
+            let transform = layer.transform
+            
+            let imageCenterX = canvasSize.width / 2 + transform.x
+            let imageCenterY = canvasSize.height / 2 + transform.y
+            
+            let scaledWidth = baseSize.width * transform.scale
+            let scaledHeight = baseSize.height * transform.scale
+            
+            let imageLeft = imageCenterX - scaledWidth / 2
+            let imageTop = imageCenterY - scaledHeight / 2
+            
+            // Convert canvas points to image pixel coordinates
+            let imagePoints = self.erasePoints.compactMap { data -> (point: CGPoint, pressure: Double)? in
+                let canvasPoint = data.point
+                let relativeX = canvasPoint.x - imageLeft
+                let relativeY = canvasPoint.y - imageTop
+                
+                let normalizedX = relativeX / scaledWidth
+                let normalizedY = relativeY / scaledHeight
+                
+                let imageX = normalizedX * currentImage.size.width
+                let imageY = normalizedY * currentImage.size.height
+                
+                return (point: CGPoint(x: imageX, y: imageY), pressure: data.pressure)
+            }
+            
+            guard imagePoints.count >= 2 else {
+                print("🧹 No valid image points after conversion")
+                self.erasePoints = []
+                return
+            }
+            
+            print("🧹 Converted \(self.erasePoints.count) canvas points to \(imagePoints.count) image points")
+            
+            // Apply pressure-sensitive erase stroke on background thread
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let erasedImage = self.applyEraseStroke(to: currentImage, points: imagePoints, brushSize: self.brushSize) else {
+                    print("🧹 Failed to apply erase")
+                    return
+                }
+                
+                // Save the erased image
+                let fileName = "erased_\(UUID().uuidString).png"
+                let url = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName)
+                
+                if let data = erasedImage.pngData() {
+                    do {
+                        try data.write(to: url)
+                        print("🧹 Saved erased image: \(fileName)")
+                        
+                        DispatchQueue.main.async {
+                            self.project.imageLayers[idx].erasedImageFileName = fileName
+                            self.store.update(self.project)
+                            
+                            // Create undo action with previous state
+                            let undoAction = CollageEditorView.UndoAction.erase(layerId: layer.id, previousFileName: previousErasedFileName)
+                            self.onEraseComplete?(self.project, undoAction)
+                        }
+                    } catch {
+                        print("🧹 Failed to save erased image: \(error)")
+                    }
+                }
+            }
+            
+            erasePoints = []
+        }
+        
+        private func applyEraseStroke(to image: UIImage, points: [(point: CGPoint, pressure: Double)], brushSize: CGFloat) -> UIImage? {
+            guard points.count >= 2 else { return nil }
+            
+            // Create a new image with erased pixels
+            let format = UIGraphicsImageRendererFormat.default()
+            format.opaque = false
+            format.scale = 1
+            
+            let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+            return autoreleasepool {
+                renderer.image { context in
+                    // Draw original image
+                    image.draw(at: .zero)
+                    
+                    // Set up erase mode (clear blend mode)
+                    let cg = context.cgContext
+                    cg.setBlendMode(.clear)
+                    cg.setLineCap(.round)
+                    cg.setLineJoin(.round)
+                    
+                    // Convert canvas points to image coordinates
+                    // (We'll need the image's displayed rect for this)
+                    // For now, use direct points - we'll fix coordinate conversion
+                    
+                    // Draw pressure-sensitive erase stroke
+                    for i in 0..<(points.count - 1) {
+                        let start = points[i]
+                        let end = points[i + 1]
+                        
+                        // Calculate line width based on average pressure
+                        // Pressure 0.0-1.0 → width 0.5x to 3x
+                        let avgPressure = (start.pressure + end.pressure) / 2.0
+                        let pressureMultiplier = 0.5 + (avgPressure * 2.5) // 0.5x to 3x
+                        let segmentWidth = brushSize * pressureMultiplier
+                        
+                        cg.setLineWidth(segmentWidth)
+                        cg.beginPath()
+                        cg.move(to: start.point)
+                        cg.addLine(to: end.point)
+                        cg.strokePath()
+                    }
+                }
+            }
+        }
+        
+        private func getPressure(from touch: UITouch) -> Double {
+            if touch.force > 0 && touch.maximumPossibleForce > 0 {
+                return Double(touch.force / touch.maximumPossibleForce)
+            } else {
+                let radius = touch.majorRadius
+                return min(max((radius - 5.0) / 15.0, 0.0), 1.0)
+            }
+        }
+        
+        private func calculateBaseImageSize(for image: UIImage, canvasSize: CGSize) -> CGSize {
+            let aspect = image.size.width / image.size.height
+            let maxDimension = min(canvasSize.width, canvasSize.height) * 0.45
+            var width = maxDimension
+            var height = width / aspect
+            if height > maxDimension {
+                height = maxDimension
+                width = height * aspect
+            }
+            return CGSize(width: width, height: height)
+        }
+    }
+    
+    // MARK: - Pressure Sensitive Tear Overlay
+    private struct PressureSensitiveTearOverlay: UIViewRepresentable {
+        @Binding var tearPathPoints: [(point: CGPoint, pressure: Double)]
+        @Binding var isTearing: Bool
+        let canvasSize: CGSize
+        let onTearComplete: () -> Void
+        let isActive: Bool
+        
+        func makeUIView(context: Context) -> PressureTearView {
+            let view = PressureTearView()
+            view.backgroundColor = .clear
+            view.isUserInteractionEnabled = true
+            return view
+        }
+        
+        func updateUIView(_ uiView: PressureTearView, context: Context) {
+            uiView.tearPathPoints = tearPathPoints
+            uiView.onTearComplete = onTearComplete
+            uiView.isActive = isActive
+            uiView.updateBinding = { points, isTearing in
+                DispatchQueue.main.async {
+                    self.tearPathPoints = points
+                    self.isTearing = isTearing
+                }
+            }
+        }
+    }
+    
+    // UIView that captures pressure
+    class PressureTearView: UIView {
+        var tearPathPoints: [(point: CGPoint, pressure: Double)] = []
+        var onTearComplete: (() -> Void)?
+        var isActive: Bool = true
+        var updateBinding: ((_ points: [(point: CGPoint, pressure: Double)], _ isTearing: Bool) -> Void)?
+        
+        private var pathLayer: CAShapeLayer?
+        
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard isActive, !hasTriggeredTear, let touch = touches.first else { 
+                print("🚫 touchesBegan blocked: isActive=\(isActive), hasTriggeredTear=\(hasTriggeredTear)")
+                return 
+            }
+            
+            let location = touch.location(in: self)
+            // Use touch radius as pressure proxy for devices without 3D Touch
+            let pressure: Double
+            if touch.force > 0 && touch.maximumPossibleForce > 0 {
+                // 3D Touch devices: use actual force
+                pressure = Double(touch.force / touch.maximumPossibleForce)
+                print("💪 Pressure from force: \(pressure)")
+            } else {
+                // Non-3D Touch: use touch radius with better range
+                // majorRadius ranges from ~5 (light) to ~20+ (hard press)
+                let radius = touch.majorRadius
+                let normalizedRadius = min(max((radius - 5.0) / 15.0, 0.0), 1.0)
+                pressure = normalizedRadius
+                print("💪 Pressure from radius: \(radius) → \(pressure)")
+            }
+            
+            tearPathPoints = [(point: location, pressure: pressure)]
+            updateBinding?(tearPathPoints, true)
+            
+            // Play tear sound at start
+            SoundEffectPlayer.shared.playTear()
+            
+            // Create visual feedback layer
+            pathLayer?.removeFromSuperlayer()
+            let layer = CAShapeLayer()
+            layer.strokeColor = UIColor.red.cgColor
+            layer.fillColor = UIColor.clear.cgColor
+            layer.lineCap = .round
+            layer.lineJoin = .round
+            self.layer.addSublayer(layer)
+            pathLayer = layer
+            
+            updatePath()
+        }
+        
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            guard isActive, !hasTriggeredTear, let touch = touches.first else { return }
+            
+            let location = touch.location(in: self)
+            // Use touch radius as pressure proxy for devices without 3D Touch
+            let pressure: Double
+            if touch.force > 0 && touch.maximumPossibleForce > 0 {
+                // 3D Touch devices: use actual force
+                pressure = Double(touch.force / touch.maximumPossibleForce)
+            } else {
+                // Non-3D Touch: use touch radius with better range
+                let radius = touch.majorRadius
+                let normalizedRadius = min(max((radius - 5.0) / 15.0, 0.0), 1.0)
+                pressure = normalizedRadius
+            }
+            
+            tearPathPoints.append((point: location, pressure: pressure))
+            updateBinding?(tearPathPoints, true)
+            
+            updatePath()
+        }
+        
+        private var hasTriggeredTear = false
+        
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            pathLayer?.removeFromSuperlayer()
+            pathLayer = nil
+            
+            // Only trigger tear if we have valid points and haven't already triggered
+            if tearPathPoints.count >= 2, isActive, !hasTriggeredTear {
+                // Set flag immediately to prevent any double-trigger
+                hasTriggeredTear = true
+                isActive = false
+                
+                print("🔪 touchesEnded: Triggering tear with \(tearPathPoints.count) points")
+                onTearComplete?()
+                
+                // Reset flags after delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.isActive = true
+                    self.hasTriggeredTear = false
+                }
+            }
+            
+            tearPathPoints = []
+            updateBinding?(tearPathPoints, false)
+        }
+        
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+            pathLayer?.removeFromSuperlayer()
+            pathLayer = nil
+            tearPathPoints = []
+            updateBinding?(tearPathPoints, false)
+        }
+        
+        private func updatePath() {
+            guard tearPathPoints.count >= 2 else { return }
+            
+            let path = UIBezierPath()
+            path.move(to: tearPathPoints[0].point)
+            
+            // Draw path with varying width based on pressure
+            for data in tearPathPoints.dropFirst() {
+                path.addLine(to: data.point)
+            }
+            
+            // Calculate average pressure for line width
+            let avgPressure = tearPathPoints.map { $0.pressure }.reduce(0, +) / Double(tearPathPoints.count)
+            let lineWidth = CGFloat(2 + avgPressure * 4) // 2-6pt based on pressure
+            
+            pathLayer?.path = path.cgPath
+            pathLayer?.lineWidth = lineWidth
+        }
+    }
+    
+    // MARK: - Main Action Circle (shared component with gradient)
+    private struct MainActionCircle: View {
+        let gradient: LinearGradient
+        let icon: String
+        let action: () -> Void
+        
+        var body: some View {
+            Button(action: action) {
+                ZStack {
+                    // Outer glow/shadow
+                    Circle()
+                        .fill(gradient)
+                        .frame(width: MainButtonMetrics.diameter + 4, height: MainButtonMetrics.diameter + 4)
+                        .blur(radius: 8)
+                        .opacity(0.4)
+                    
+                    // Main button
+                    Circle()
+                        .fill(gradient)
+                        .frame(width: MainButtonMetrics.diameter, height: MainButtonMetrics.diameter)
+                        .overlay(
+                            Image(systemName: icon)
+                                .font(.system(size: MainButtonMetrics.iconSize, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
+                        )
+                }
+                .contentShape(Circle())
+                .fixedSize()
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    
+    private var audioDisplayName: String {
+        if let metadata = project.musicMetadata {
+            return "\(metadata.title) • \(metadata.artist)"
+        }
+        return "My Sound"
+    }
+    
+    private func toggleAudioPlayback() {
+        guard let audio = audioURL() else {
+            print("❌ No audio URL found")
+            return
+        }
+        
+        print("🔊 Audio file path: \(audio.path)")
+        
+        // Check file details
+        if let attributes = try? FileManager.default.attributesOfItem(atPath: audio.path) {
+            let fileSize = attributes[.size] as? Int ?? 0
+            print("🔊 File size: \(fileSize) bytes")
+            
+            if fileSize == 0 {
+                print("❌ Audio file is empty (0 bytes) - simulator recording issue")
+                print("ℹ️  Audio playback only works on real devices or with actual audio input")
+                return
+            }
+        }
+        
+        if player.isPlaying {
+            print("🔊 Stopping playback")
+            player.stop()
+        } else {
+            print("🔊 Starting playback")
+            do {
+                try player.play(url: audio)
+                print("✅ Playback started successfully")
+            } catch {
+                print("❌ Playback failed: \(error)")
+                print("ℹ️  This is likely due to simulator audio limitations")
+            }
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 12) {
+            // Undo button
+            Button {
+                undoLastAction()
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 24))
+                    Text("Undo")
+                        .font(.caption2)
+                }
+                .frame(width: 70)
+                .foregroundStyle(.white)
+            }
+            .disabled(project.imageLayers.isEmpty && project.textLayers.isEmpty && (project.drawingDataBase64?.isEmpty ?? true))
+            .opacity((project.imageLayers.isEmpty && project.textLayers.isEmpty && (project.drawingDataBase64?.isEmpty ?? true)) ? 0.3 : 1.0)
+            
+            Spacer()
+            
+            // Other controls (scrollable)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 16) {
+                    Button { addTextLayer() } label: { label("Text", "textformat") }
+                    
+                    Button { showLayerPanel = true } label: { label("Layers", "square.3.layers.3d") }
+
+                    Button {
+                        Task { await export() }
+                    } label: { label("Share", "square.and.arrow.up") }
+                    .disabled(isExporting)
+
+                    if isExporting {
+                        ProgressView(value: exportProgress)
+                            .frame(width: 120)
+                    }
+                }
+            }
+        }
+    }
+
+    private func label(_ title: String, _ system: String) -> some View {
+        Label(title, systemImage: system)
+            .labelStyle(.iconOnly)
+            .font(.system(size: 24))
+    }
+
+    private func resetCanvas() {
+        // Delete the entire project and all its files
+        let projectId = project.id
+        
+        // Delete all image files
+        for layer in project.imageLayers {
+            let url = store.urlForProjectAsset(projectId: projectId, fileName: layer.imageFileName)
+            try? FileManager.default.removeItem(at: url)
+            
+            if let erasedFile = layer.erasedImageFileName {
+                let erasedUrl = store.urlForProjectAsset(projectId: projectId, fileName: erasedFile)
+                try? FileManager.default.removeItem(at: erasedUrl)
+            }
+        }
+        
+        // Delete the audio file
+        if let audioFileName = project.audioFileName {
+            let audioUrl = store.urlForProjectAsset(projectId: projectId, fileName: audioFileName)
+            try? FileManager.default.removeItem(at: audioUrl)
+        }
+        
+        // Remove project from store
+        store.delete(project)
+        
+        print("🔄 Moment reset - returning to home screen")
+        
+        // Notify parent to dismiss and return to initial capture screen
+        onReset?()
+    }
+    
+    private func addImages(_ images: [UIImage]) {
+        guard !images.isEmpty else { return }
+        for image in images {
+            // Downscale to max 1000px on longest side for better performance and memory
+            let downscaled = downscaleImage(image, maxDimension: 1000)
+            
+            let fileName = "img_\(UUID().uuidString).jpg"
+            // Use 60% quality for better storage efficiency
+            if let data = downscaled.jpegData(compressionQuality: 0.60) {
+                let url = store.urlForProjectAsset(projectId: project.id, fileName: fileName)
+                try? data.write(to: url)
+                
+                let position = calculateImagePosition(for: project.imageLayers.count)
+                
+                var layer = ImageLayer(imageFileName: fileName)
+                layer.transform = Transform2D(x: position.x, y: position.y, scale: 1.4, rotation: 0) // Increased from 1.0 to 1.4 for overlap
+                layer.zIndex = project.imageLayers.count
+                project.imageLayers.append(layer)
+                undoStack.append(.addImage(layer: layer))
+            }
+        }
+        store.update(project)
+    }
+    
+    private func downscaleImage(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        return autoreleasepool {
+            let size = image.size
+            let maxSide = max(size.width, size.height)
+            
+            // If already small enough, return as-is
+            guard maxSide > maxDimension else { return image }
+            
+            let scale = maxDimension / maxSide
+            let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+            
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            format.opaque = false
+            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+            return renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: newSize))
+            }
+        }
+    }
+
+    private func baseImageSize(for image: UIImage, canvasSize: CGSize) -> CGSize {
+        let aspect = image.size.width / image.size.height
+        let maxDimension = min(canvasSize.width, canvasSize.height) * 0.45
+        var width = maxDimension
+        var height = width / aspect
+        if height > maxDimension {
+            height = maxDimension
+            width = height * aspect
+        }
+        return CGSize(width: width, height: height)
+    }
+    
+    private func calculateImagePosition(for index: Int) -> (x: Double, y: Double) {
+        // Position images in a 2x2 grid layout
+        // Base image size is roughly 170-200 pts, so offsets place them in four quadrants
+        // Leave space for audio badge at top (~100pt) and button at bottom (~300pt from bottom)
+        
+        let imageWidth: Double = 187 / 2  // Half of displayed width for offset from center
+        let imageHeight: Double = 125     // Half of displayed height
+        
+        switch index {
+        case 0: // Top left
+            return (-imageWidth, -imageHeight - 50)
+        case 1: // Top right
+            return (imageWidth, -imageHeight - 50)
+        case 2: // Bottom left - align top edge with bottom edge of image 1
+            return (-imageWidth, imageHeight - 50)
+        case 3: // Bottom right - align top edge with bottom edge of image 2
+            return (imageWidth, imageHeight - 50)
+        default: // Center (5th+ image layered on top)
+            return (0, -50)
+        }
+    }
+
+    private func addTextLayer() {
+        // Don't play click here - button already plays it
+        
+        // Use "Courier" for classic typewriter style (system font on iOS)
+        // Alternative: "American Typewriter" for more stylized look
+        let layer = TextLayer(
+            text: "",
+            fontName: "Courier-Bold",
+            fontSize: 32,
+            hexColor: "#000000", // Black text for visibility on cork
+            transform: .identity
+        )
+        project.textLayers.append(layer)
+        undoStack.append(.addText(layer: layer))
+        selectedTextId = layer.id // Auto-select for editing
+        editingText = ""
+        editingTextColor = Color(hex: layer.hexColor)
+        editingFontSize = layer.fontSize
+        
+        // Defer store update to avoid blocking UI
+        DispatchQueue.main.async {
+            self.showTextEditor = true
+        }
+        store.update(project)
+        print("✏️ Added text layer with typewriter font - showing editor")
+    }
+    
+    private func bringToFront(layer: ImageLayer) {
+        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) else { return }
+        
+        // Find the maximum zIndex
+        let maxZ = project.imageLayers.map { $0.zIndex }.max() ?? 0
+        
+        // Set this layer's zIndex to max + 1
+        let newZIndex = maxZ + 1
+        project.imageLayers[idx].zIndex = newZIndex
+        
+        print("🔼 Bringing to front: layer \(idx), old zIndex: \(layer.zIndex), new zIndex: \(newZIndex)")
+        print("   All zIndexes: \(project.imageLayers.map { $0.zIndex })")
+        
+        store.update(project)
+    }
+    
+    private func sendToBack(layer: ImageLayer) {
+        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) else { return }
+        
+        // Find the minimum zIndex
+        let minZ = project.imageLayers.map { $0.zIndex }.min() ?? 0
+        
+        // Set this layer's zIndex to min - 1
+        project.imageLayers[idx].zIndex = minZ - 1
+        store.update(project)
+    }
+    
+    private func deleteImage(layer: ImageLayer) {
+        // Prevent deletion during drawing or tool operations
+        guard !isDrawing else {
+            print("⚠️ Cannot delete image while drawing")
+            return
+        }
+        
+        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) else {
+            print("⚠️ Image not found for deletion")
+            return
+        }
+        
+        print("🗑️ Deleting image at index \(idx)")
+        
+        // Add to undo stack before removing
+        undoStack.append(.deleteImage(layer: layer, index: idx))
+        
+        // Remove from project
+        project.imageLayers.remove(at: idx)
+        
+        // Clear selection if this was the selected image
+        if selectedImageId == layer.id {
+            selectedImageId = nil
+            showToolbarForSelectedImage = false
+        }
+        
+        // Update on main thread to prevent race conditions
+        DispatchQueue.main.async {
+            self.store.update(self.project)
+        }
+    }
+    
+    private func autoRemoveBackground(for imageId: UUID) {
+        // Prevent multiple simultaneous removals
+        guard !isRemovingBackground else {
+            print("🔄 Background removal already in progress")
+            return
+        }
+        
+        guard let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) else {
+            print("⚠️ Image not found for background removal")
+            return
+        }
+        
+        let layer = project.imageLayers[idx]
+        let originalFileName = layer.erasedImageFileName ?? layer.imageFileName
+        let imageURL = store.urlForProjectAsset(projectId: project.id, fileName: originalFileName)
+        
+        guard let originalImage = UIImage(contentsOfFile: imageURL.path) else {
+            print("❌ Failed to load image for background removal")
+            return
+        }
+        
+        isRemovingBackground = true
+        print("🎭 Starting automatic background removal for image: \(imageId)")
+        
+        Task {
+            // Try to remove background
+            if let processedImage = await BackgroundRemover.removeBackground(from: originalImage) {
+                // Save backup of original image before replacing
+                let backupFileName = "backup_\(UUID().uuidString).jpg"
+                let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
+                
+                // Save original image data to backup
+                guard let originalData = try? Data(contentsOf: imageURL) else {
+                    print("❌ Failed to read original image data for backup")
+                    await MainActor.run {
+                        isRemovingBackground = false
+                    }
+                    return
+                }
+                
+                do {
+                    // Save backup
+                    try originalData.write(to: backupURL)
+                    print("💾 Saved backup: \(backupFileName)")
+                    
+                    // Save the background-removed image (replace original)
+                    let fileName = layer.imageFileName
+                    let url = store.urlForProjectAsset(projectId: project.id, fileName: fileName)
+                    
+                    if let data = processedImage.pngData() {
+                        try data.write(to: url)
+                        print("✅ Background removed and saved: \(fileName)")
+                        
+                        await MainActor.run {
+                            // Update the layer to use the new image
+                            project.imageLayers[idx].erasedImageFileName = nil // Clear erased version if any
+                            store.update(project)
+                            isRemovingBackground = false
+                            
+                            // Add undo action
+                            let undoAction = UndoAction.removeBackground(layerId: layer.id, backupFileName: backupFileName)
+                            undoStack.append(undoAction)
+                            print("🔄 Added background removal to undo stack")
+                            
+                            // Clear cache to force reload
+                            imageCache.removeValue(forKey: layer.imageFileName)
+                            refreshTrigger = UUID()
+                        }
+                    } else {
+                        print("❌ Failed to get PNG data from processed image")
+                        // Clean up backup
+                        try? FileManager.default.removeItem(at: backupURL)
+                        await MainActor.run {
+                            isRemovingBackground = false
+                        }
+                    }
+                } catch {
+                    print("❌ Failed to save background-removed image: \(error)")
+                    // Clean up backup on error
+                    try? FileManager.default.removeItem(at: backupURL)
+                    await MainActor.run {
+                        isRemovingBackground = false
+                    }
+                }
+            } else {
+                print("⚠️ Background removal failed or no person detected - keeping original image")
+                await MainActor.run {
+                    isRemovingBackground = false
+                }
+            }
+        }
+    }
+    
+    private func undoLastAction() {
+        // Don't undo image actions while in drawing mode
+        if isDrawing {
+            print("⚠️ Undo blocked - currently in drawing mode, use drawing toolbar undo")
+            return
+        }
+        
+        print("🔄 Undo stack size: \(undoStack.count)")
+        print("🔄 Undo stack contents: \(undoStack.map { String(describing: $0) })")
+        
+        if let last = undoStack.popLast() {
+            print("🔄 Undoing action: \(last)")
+            switch last {
+            case let .split(original, pieces):
+                // Remove the two pieces and restore original
+                project.imageLayers.removeAll { layer in
+                    pieces.contains(where: { $0.imageFileName == layer.imageFileName })
+                }
+                project.imageLayers.append(original)
+                store.update(project)
+                return
+            case let .addImage(layer):
+                // Remove the added image
+                project.imageLayers.removeAll { $0.id == layer.id }
+                store.update(project)
+                return
+            case let .deleteImage(layer, index):
+                // Restore the deleted image at its original index
+                if index <= project.imageLayers.count {
+                    project.imageLayers.insert(layer, at: index)
+                } else {
+                    project.imageLayers.append(layer)
+                }
+                store.update(project)
+                return
+            case let .erase(layerId, previousFileName):
+                // Restore previous erased state (or remove erasure)
+                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
+                    project.imageLayers[idx].erasedImageFileName = previousFileName
+                    store.update(project)
+                }
+                
+            case let .removeBackground(layerId, backupFileName):
+                // Restore original image from backup
+                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
+                    let layer = project.imageLayers[idx]
+                    let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
+                    let originalURL = store.urlForProjectAsset(projectId: project.id, fileName: layer.imageFileName)
+                    
+                    // Restore original from backup
+                    if FileManager.default.fileExists(atPath: backupURL.path),
+                       let backupData = try? Data(contentsOf: backupURL) {
+                        do {
+                            try backupData.write(to: originalURL)
+                            print("🔄 Restored original image from backup: \(backupFileName)")
+                            
+                            // Clean up backup file
+                            try? FileManager.default.removeItem(at: backupURL)
+                            
+                            // Clear cache and refresh
+                            imageCache.removeValue(forKey: layer.imageFileName)
+                            refreshTrigger = UUID()
+                            store.update(project)
+                        } catch {
+                            print("❌ Failed to restore original image: \(error)")
+                        }
+                    } else {
+                        print("⚠️ Backup file not found: \(backupFileName)")
+                    }
+                }
+                
+            case let .draw(layerId, previousDrawingBase64):
+                // Restore previous drawing state
+                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
+                    // Undo drawing on a specific image
+                    project.imageLayers[idx].drawingDataBase64 = previousDrawingBase64
+                    store.update(project)
+                    print("🎨 Undid drawing on image: \(layerId)")
+                } else {
+                    // Undo global canvas drawing
+                    print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                    print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
+                    
+                    project.drawingDataBase64 = previousDrawingBase64
+                    if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
+                        self.drawingData = drawingData
+                        print("🎨 Restored drawing data: \(drawingData.count) bytes")
+                    } else {
+                        self.drawingData = Data()
+                        print("🎨 Cleared drawing data (no previous drawing)")
+                    }
+                    
+                    // Force view refresh
+                    self.refreshTrigger = UUID()
+                    
+                    // Update store AFTER setting the data
+                    store.update(project)
+                    
+                    print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                    print("🎨 Undid drawing on global canvas - drawing data now: \(self.drawingData.count) bytes")
+                    
+                    // Double-check the store has the updated project
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        if let storedProject = self.store.projects.first(where: { $0.id == self.project.id }) {
+                            print("🔍 Store verification: stored project.drawingDataBase64 = \(storedProject.drawingDataBase64?.prefix(20) ?? "nil")")
+                        }
+                    }
+                }
+                return
+            case let .addText(layer):
+                // Remove the added text
+                project.textLayers.removeAll { $0.id == layer.id }
+                store.update(project)
+                print("✏️ Undid text addition")
+                return
+            case let .deleteText(layer, index):
+                // Restore the deleted text at its original index
+                if index <= project.textLayers.count {
+                    project.textLayers.insert(layer, at: index)
+                } else {
+                    project.textLayers.append(layer)
+                }
+                store.update(project)
+                print("✏️ Restored deleted text")
+                return
+            }
+        }
+        // fallback legacy undo if no recorded action
+        // Priority: erase/text/drawing/remove image
+        if selectedTool == .erase {
+            if let idx = project.imageLayers.lastIndex(where: { $0.erasedImageFileName != nil }) {
+                if let name = project.imageLayers[idx].erasedImageFileName {
+                    let url = store.urlForProjectAsset(projectId: project.id, fileName: name)
+                    try? FileManager.default.removeItem(at: url)
+                }
+                project.imageLayers[idx].erasedImageFileName = nil
+            }
+        } else if !project.textLayers.isEmpty {
+            project.textLayers.removeLast()
+        } else if project.drawingDataBase64 != nil && !project.drawingDataBase64!.isEmpty {
+            project.drawingDataBase64 = nil
+            drawingData = Data()
+        } else if !project.imageLayers.isEmpty {
+            _ = project.imageLayers.removeLast()
+        }
+        store.update(project)
+    }
+
+    private func startRecording() {
+        let fileName = "audio_\(UUID().uuidString).m4a"
+        let url = store.urlForProjectAsset(projectId: project.id, fileName: fileName)
+        do {
+            try recorder.startRecording(to: url)
+            project.audioFileName = fileName
+            store.update(project)
+        } catch {
+            print("Recording failed: \(error)")
+        }
+    }
+
+    private func audioURL() -> URL? {
+        guard let name = project.audioFileName else { return nil }
+        return store.urlForProjectAsset(projectId: project.id, fileName: name)
+    }
+
+    @MainActor
+    private func export() async {
+        guard purchases.canExport else {
+            showPaywall = true
+            return
+        }
+        isExporting = true
+        
+        do {
+            let bundle = try BundleExporter.exportBundle(project: project, assetURLProvider: assetURL)
+            purchases.registerSuccessfulExport()
+            
+            // Present share sheet with bundle
+            let av = UIActivityViewController(activityItems: [bundle.bundleURL], applicationActivities: nil)
+            UIApplication.shared.firstKeyWindow?.rootViewController?.present(av, animated: true)
+        } catch {
+            print("Export failed: \(error)")
+        }
+        isExporting = false
+    }
+
+    private func assetURL(for fileName: String) -> URL? {
+        store.urlForProjectAsset(projectId: project.id, fileName: fileName)
+    }
+    
+    private func calculateImageBounds(canvasSize: CGSize) -> [ImageBounds] {
+        var bounds: [ImageBounds] = []
+        
+        print("📐 BOUNDS: Canvas size: \(canvasSize)")
+        
+        for layer in project.imageLayers {
+            guard let ui = loadImage(fileName: layer.imageFileName) else { continue }
+            
+            let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+            let transform = layer.transform
+            
+            print("📐 BOUNDS: Layer \(layer.id.uuidString.prefix(8))")
+            print("   Transform: x=\(transform.x) y=\(transform.y) scale=\(transform.scale)")
+            print("   Canvas center would be: (\(canvasSize.width/2), \(canvasSize.height/2))")
+            print("   Transform offset from center: (\(transform.x), \(transform.y))")
+            print("   Base size (before scale): \(baseSize)")
+            
+            // Images in ZStack are centered at canvas center, then offset by transform
+            // But touch coordinates seem to be in a different space
+            // Let's try WITHOUT any Y offset first to see the raw calculation
+            let centerX = canvasSize.width / 2 + transform.x
+            let centerY = canvasSize.height / 2 + transform.y
+            
+            let scaledWidth = baseSize.width * transform.scale
+            let scaledHeight = baseSize.height * transform.scale
+            
+            let rawFrame = CGRect(
+                x: centerX - scaledWidth / 2,
+                y: centerY - scaledHeight / 2,
+                width: scaledWidth,
+                height: scaledHeight
+            )
+            
+            print("   Raw frame (no offset): \(rawFrame)")
+            
+            // Now add the empirical offset we've been using
+            let yOffset: CGFloat = 250
+            let adjustedFrame = rawFrame.offsetBy(dx: 0, dy: yOffset)
+            print("   Adjusted frame (+\(yOffset)pt Y): \(adjustedFrame)")
+            
+            bounds.append(ImageBounds(id: layer.id, frame: adjustedFrame, zIndex: layer.zIndex))
+        }
+        
+        return bounds
+    }
+    
+    private enum SplitDirection {
+        case horizontal, vertical
+    }
+    
+    private func performTearOnSelectedImage(canvasSize: CGSize) {
+        let now = Date()
+        print("🔍 performTearOnSelectedImage called. isTearProcessing: \(isTearProcessing), time since last: \(now.timeIntervalSince(lastTearTimestamp))s")
+        
+        // Prevent double-tear with both flag and timestamp check
+        guard !isTearProcessing else {
+            print("⏸️ Tear already in progress, skipping")
+            return
+        }
+        
+        // Also prevent tears within 1 second of each other
+        guard now.timeIntervalSince(lastTearTimestamp) > 1.0 else {
+            print("⏸️ Tear too soon after last tear, skipping")
+            return
+        }
+        
+        guard let selectedId = selectedImageId,
+              let idx = project.imageLayers.firstIndex(where: { $0.id == selectedId }),
+              let ui = loadImage(fileName: project.imageLayers[idx].imageFileName),
+              tearPathPoints.count >= 2 else {
+            print("❌ Tear failed: insufficient data - selectedId: \(String(describing: selectedImageId)), points: \(tearPathPoints.count)")
+            selectedImageId = nil
+            isTearProcessing = false
+            return
+        }
+        
+        print("✂️ Starting tear on image \(selectedId), index: \(idx), points: \(tearPathPoints.count), current layer count: \(project.imageLayers.count)")
+        
+        // IMPORTANT: Capture data BEFORE clearing state
+        let layer = project.imageLayers[idx]
+        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+        let transform = layer.transform
+        let capturedTearPoints = tearPathPoints // Capture before clearing!
+        
+        // Set flags immediately and clear state to prevent re-entry
+        isTearProcessing = true
+        lastTearTimestamp = now
+        selectedImageId = nil
+        tearPathPoints = []
+        isTearingSelectedImage = false
+        
+        // Calculate where the image is rendered
+        // The canvas view centers images using ZStack, then applies transform offset
+        let imageCenterX = canvasSize.width / 2 + transform.x
+        let imageCenterY = canvasSize.height / 2 + transform.y
+        
+        let scaledWidth = baseSize.width * transform.scale
+        let scaledHeight = baseSize.height * transform.scale
+        
+        // Calculate image bounds (top-left corner)
+        let imageLeft = imageCenterX - scaledWidth / 2
+        let imageTop = imageCenterY - scaledHeight / 2
+        
+        // Convert tear path from canvas coordinates to image pixel coordinates
+        let imagePath = UIBezierPath()
+        var validPoints = 0
+        
+        print("📍 Converting \(capturedTearPoints.count) tear points to image coordinates")
+        print("📍 Image bounds: left=\(imageLeft), top=\(imageTop), scaledWidth=\(scaledWidth), scaledHeight=\(scaledHeight)")
+        
+        var firstImagePoint: CGPoint?
+        var lastImagePoint: CGPoint?
+        
+        for pathData in capturedTearPoints {
+            let canvasPoint = pathData.point
+            
+            // Convert canvas point to image-relative coordinates (0 to scaledWidth/Height)
+            let relativeX = canvasPoint.x - imageLeft
+            let relativeY = canvasPoint.y - imageTop
+            
+            // Normalize to 0-1 range, then scale to actual image pixel coordinates
+            let normalizedX = relativeX / scaledWidth
+            let normalizedY = relativeY / scaledHeight
+            
+            let imageX = normalizedX * ui.size.width
+            let imageY = normalizedY * ui.size.height
+            
+            // CLAMP points to image bounds (don't filter them out)
+            // This ensures the tear path extends naturally to the edges
+            let clampedX = max(0, min(ui.size.width, imageX))
+            let clampedY = max(0, min(ui.size.height, imageY))
+            let imagePoint = CGPoint(x: clampedX, y: clampedY)
+            
+            if validPoints == 0 {
+                imagePath.move(to: imagePoint)
+                firstImagePoint = imagePoint
+            } else {
+                imagePath.addLine(to: imagePoint)
+            }
+            lastImagePoint = imagePoint
+            validPoints += 1
+        }
+        
+        // Check if this is a closed path (circle/loop)
+        if let first = firstImagePoint, let last = lastImagePoint {
+            let distance = hypot(last.x - first.x, last.y - first.y)
+            let threshold = min(ui.size.width, ui.size.height) * 0.1 // 10% of smallest dimension
+            
+            if distance < threshold {
+                imagePath.close()
+                print("✂️ Closed path detected (distance: \(distance), threshold: \(threshold))")
+            } else {
+                print("✂️ Open path (distance: \(distance), threshold: \(threshold))")
+            }
+        }
+        
+        guard validPoints >= 2 else {
+            print("❌ Tear failed: path doesn't cross image (valid points: \(validPoints))")
+            selectedImageId = nil
+            return
+        }
+        
+        print("✂️ Starting tear with \(validPoints) valid points")
+        
+        // Split on background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (first, second) = ImageSplitter.splitImage(ui, alongPath: imagePath)
+            
+            guard let piece1 = first, let piece2 = second else {
+                print("❌ ImageSplitter returned nil pieces")
+                return
+            }
+            
+            let fileName1 = "torn_1_\(UUID().uuidString).png"
+            let fileName2 = "torn_2_\(UUID().uuidString).png"
+            
+            let url1 = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName1)
+            let url2 = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName2)
+            
+            if let data1 = piece1.pngData(), let data2 = piece2.pngData() {
+                do {
+                    try data1.write(to: url1)
+                    try data2.write(to: url2)
+                    
+                    print("✂️ Saved split images: \(fileName1), \(fileName2)")
+                    
+                    DispatchQueue.main.async {
+                        self.handleImageSplit(
+                            originalLayer: layer,
+                            originalIndex: idx,
+                            topFileName: fileName1,
+                            bottomFileName: fileName2,
+                            originalTransform: layer.transform
+                        )
+                        // Reset processing flag and auto-deselect tool
+                        self.isTearProcessing = false
+                        
+                        // Auto-complete: deselect tool so user can immediately move pieces
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            self.selectedTool = .pen
+                            self.selectedImageId = nil
+                            self.showToolbarForSelectedImage = false
+                        }
+                    }
+                } catch {
+                    print("❌ Failed to save split images: \(error)")
+                    DispatchQueue.main.async {
+                        self.isTearProcessing = false
+                    }
+                }
+            }
+        }
+    }
+    
+    private func handleTearGesture(layerId: UUID, pathPoints: [CGPoint], canvasSize: CGSize) {
+        print("✂️ HANDLER: Tear gesture received for layer \(layerId)")
+        
+        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) else {
+            print("✂️ HANDLER: ❌ Layer not found")
+            return
+        }
+        
+        guard let ui = loadImage(fileName: project.imageLayers[idx].imageFileName) else {
+            print("✂️ HANDLER: ❌ Image not loaded")
+            return
+        }
+        
+        print("✂️ HANDLER: Image loaded, size: \(ui.size)")
+        
+        let layer = project.imageLayers[idx]
+        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+        let transform = layer.transform
+        
+        // Calculate where the image is actually rendered on canvas
+        let yOffset: CGFloat = 250 // Same offset used in bounds calculation
+        let imageCenterX = canvasSize.width / 2 + transform.x
+        let imageCenterY = canvasSize.height / 2 + transform.y + yOffset
+        
+        let scaledWidth = baseSize.width * transform.scale
+        let scaledHeight = baseSize.height * transform.scale
+        
+        // Convert canvas path points to image pixel coordinates
+        let imagePath = UIBezierPath()
+        for (i, canvasPoint) in pathPoints.enumerated() {
+            // Convert from canvas coords to image-relative coords
+            let relativeX = canvasPoint.x - (imageCenterX - scaledWidth / 2)
+            let relativeY = canvasPoint.y - (imageCenterY - scaledHeight / 2)
+            
+            // Scale to image pixel coordinates
+            let imageX = (relativeX / scaledWidth) * ui.size.width
+            let imageY = (relativeY / scaledHeight) * ui.size.height
+            
+            let imagePoint = CGPoint(x: imageX, y: imageY)
+            
+            if i == 0 {
+                imagePath.move(to: imagePoint)
+            } else {
+                imagePath.addLine(to: imagePoint)
+            }
+        }
+        
+        print("✂️ HANDLER: Starting split on background thread...")
+        
+        // Split on background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (first, second) = ImageSplitter.splitImage(ui, alongPath: imagePath)
+            
+            guard let topImage = first, let bottomImage = second else {
+                print("✂️ HANDLER: ❌ Split failed")
+                return
+            }
+            
+            print("✂️ HANDLER: ✅ Split succeeded, saving files...")
+            
+            let topFileName = "torn_top_\(UUID().uuidString).png"
+            let bottomFileName = "torn_bottom_\(UUID().uuidString).png"
+            
+            let topURL = self.store.urlForProjectAsset(projectId: self.project.id, fileName: topFileName)
+            let bottomURL = self.store.urlForProjectAsset(projectId: self.project.id, fileName: bottomFileName)
+            
+            if let topData = topImage.pngData(),
+               let bottomData = bottomImage.pngData() {
+                do {
+                    try topData.write(to: topURL)
+                    try bottomData.write(to: bottomURL)
+                    
+                    print("✂️ HANDLER: ✅ Files saved, updating UI...")
+                    
+                    DispatchQueue.main.async {
+                        self.handleImageSplit(
+                            originalLayer: layer,
+                            originalIndex: idx,
+                            topFileName: topFileName,
+                            bottomFileName: bottomFileName,
+                            originalTransform: layer.transform
+                        )
+                    }
+                } catch {
+                    print("✂️ HANDLER: ❌ File save failed: \(error)")
+                }
+            }
+        }
+    }
+    
+    private func handleImageSplit(
+        originalLayer: ImageLayer,
+        originalIndex: Int,
+        topFileName: String,
+        bottomFileName: String,
+        originalTransform: Transform2D
+    ) {
+        print("✂️ SPLIT: Called! Current layer count: \(project.imageLayers.count), removing index \(originalIndex)")
+        
+        // Guard against invalid index
+        guard originalIndex < project.imageLayers.count else {
+            print("❌ SPLIT: Invalid index \(originalIndex), layer count: \(project.imageLayers.count)")
+            return
+        }
+        
+        // Remove the original image layer
+        project.imageLayers.remove(at: originalIndex)
+        print("✂️ SPLIT: Removed layer. New count: \(project.imageLayers.count)")
+        
+        // Calculate separation: move pieces apart by 7.5% in opposite directions
+        let separationDistance: CGFloat = 20 // pixels
+        
+        // Create two new layers for the split pieces
+        // First piece moves up and slightly left
+        var topTransform = originalTransform
+        topTransform.x -= separationDistance * 0.5
+        topTransform.y -= separationDistance
+        
+        let topLayer = ImageLayer(
+            imageFileName: topFileName,
+            opacity: originalLayer.opacity,
+            transform: topTransform,
+            zIndex: originalLayer.zIndex
+        )
+        
+        // Second piece moves down and slightly right
+        var bottomTransform = originalTransform
+        bottomTransform.x += separationDistance * 0.5
+        bottomTransform.y += separationDistance
+        
+        let bottomLayer = ImageLayer(
+            imageFileName: bottomFileName,
+            opacity: originalLayer.opacity,
+            transform: bottomTransform,
+            zIndex: originalLayer.zIndex + 1
+        )
+        
+        print("✂️ SPLIT: Adding two new layers")
+        
+        // Push undo action BEFORE mutating store further
+        undoStack.append(.split(original: originalLayer, pieces: [topLayer, bottomLayer]))
+        
+        // Add both new layers
+        project.imageLayers.append(topLayer)
+        project.imageLayers.append(bottomLayer)
+        store.update(project)
+        
+        print("✂️ SPLIT: ✅ Complete! Total layers now: \(project.imageLayers.count)")
+    }
+}
+
+struct TransformableImage<Overlay: View>: View {
+    let uiImage: UIImage
+    let baseSize: CGSize
+    @Binding var transform: Transform2D
+    let overlay: Overlay
+
+    init(uiImage: UIImage, baseSize: CGSize, transform: Binding<Transform2D>, @ViewBuilder overlay: () -> Overlay) {
+        self.uiImage = uiImage
+        self.baseSize = baseSize
+        self._transform = transform
+        self.overlay = overlay()
+    }
+
+    var body: some View {
+        Image(uiImage: uiImage)
+            .resizable()
+            .scaledToFit()
+            .frame(width: baseSize.width, height: baseSize.height)
+            .overlay(overlay)
+            .modifier(TransformModifier(transform: $transform))
+    }
+}
+
+extension TransformableImage where Overlay == EmptyView {
+    init(uiImage: UIImage, baseSize: CGSize, transform: Binding<Transform2D>) {
+        self.init(uiImage: uiImage, baseSize: baseSize, transform: transform) {
+            EmptyView()
+        }
+    }
+}
+
+private struct TextEditorOverlay: View {
+    @Binding var text: String
+    @Binding var textColor: Color
+    @Binding var fontSize: Double
+    var onDone: () -> Void
+    var onCancel: () -> Void
+    @FocusState private var isFocused: Bool
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Semi-transparent backdrop
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    onCancel()
+                }
+            
+            // Input area (like Messages app)
+            VStack(spacing: 0) {
+                // Color picker and size picker
+                HStack(spacing: 20) {
+                    Text("Color:")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                    
+                    Button {
+                        textColor = .black
+                    } label: {
+                        Circle()
+                            .fill(Color.black)
+                            .frame(width: 40, height: 40)
+                            .overlay(
+                                Circle()
+                                    .stroke(textColor == .black ? Color.white : Color.clear, lineWidth: 3)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button {
+                        textColor = .white
+                    } label: {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 40, height: 40)
+                            .overlay(
+                                Circle()
+                                    .stroke(textColor == .white ? Color.black : Color.clear, lineWidth: 3)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Spacer()
+                    
+                    // Size buttons
+                    Text("Size:")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                    
+                    Button {
+                        fontSize = 24
+                    } label: {
+                        Text("S")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(fontSize == 24 ? .black : .white)
+                            .frame(width: 32, height: 32)
+                            .background(fontSize == 24 ? Color.white : Color.clear)
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button {
+                        fontSize = 32
+                    } label: {
+                        Text("M")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(fontSize == 32 ? .black : .white)
+                            .frame(width: 32, height: 32)
+                            .background(fontSize == 32 ? Color.white : Color.clear)
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button {
+                        fontSize = 48
+                    } label: {
+                        Text("L")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(fontSize == 48 ? .black : .white)
+                            .frame(width: 32, height: 32)
+                            .background(fontSize == 48 ? Color.white : Color.clear)
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Spacer()
+                    
+                    Button("Done") {
+                        onDone()
+                    }
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color.gray.opacity(0.9))
+                
+                // Text field
+                HStack(spacing: 12) {
+                    TextField("Type your text", text: $text)
+                        .font(.custom("Courier-Bold", size: 20))
+                        .foregroundColor(.black)
+                        .padding(12)
+                        .background(Color.white)
+                        .cornerRadius(20)
+                        .focused($isFocused)
+                        .submitLabel(.done)
+                        .onSubmit {
+                            onDone()
+                        }
+                        .toolbar {
+                            ToolbarItemGroup(placement: .keyboard) {
+                                Spacer()
+                                Button("Done") {
+                                    onDone()
+                                }
+                                .font(.system(size: 17, weight: .semibold))
+                            }
+                        }
+                    
+                    Button {
+                        onCancel()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundColor(.gray)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(Color(white: 0.95))
+            }
+        }
+        .task {
+            // Use task for better performance
+            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
+                isFocused = true
+        }
+    }
+}
+
+private struct TransformableText: View {
+    let text: String
+    let fontName: String
+    let fontSize: Double
+    let color: Color
+    @State var transform: Transform2D
+    let isSelected: Bool
+    var onChange: (Transform2D) -> Void
+    var onTap: () -> Void
+    var onTextChange: (String) -> Void
+
+    var body: some View {
+        Text(text)
+            .font(.custom(fontName, size: CGFloat(fontSize)))
+            .foregroundStyle(color)
+            .padding(8)
+            .background(Color.black.opacity(0.3))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isSelected ? Color.blue : Color.clear, lineWidth: isSelected ? 2 : 0)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6)) // Only text background is tappable, not transparent areas
+            .scaleEffect(transform.scale)
+            .rotationEffect(.radians(transform.rotation))
+            .offset(x: transform.x, y: transform.y)
+            .modifier(TransformModifier(transform: $transform, isEnabled: true))
+            .onTapGesture(count: 1) {
+                // Single tap to edit
+                        onTap()
+                    }
+            .onChange(of: transform) { onChange($0) }
+    }
+}
+
+private struct TransformModifier: ViewModifier {
+    @Binding var transform: Transform2D
+    @State private var lastOffset = CGSize.zero
+    @State private var lastScale: Double = 1.0
+    @State private var lastRotation: Double = 0.0
+    @State private var hasInitialized = false
+    var isEnabled: Bool = true // Enable/disable gestures
+    var onGestureEnd: (() -> Void)?
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .gesture(dragGesture.simultaneously(with: magnification).simultaneously(with: rotation))
+                .onAppear {
+                    initializeState()
+                }
+                .onChange(of: transform.x) { _ in
+                    if !hasInitialized {
+                        initializeState()
+                    }
+                }
+        } else {
+            content
+        }
+    }
+    
+    private func initializeState() {
+        if !hasInitialized {
+            lastOffset = CGSize(width: transform.x, height: transform.y)
+            lastScale = transform.scale
+            lastRotation = transform.rotation
+            hasInitialized = true
+            print("🔄 TransformModifier initialized: offset=\(lastOffset), scale=\(lastScale), rotation=\(lastRotation)")
+        }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                // Direct assignment for immediate response, no animation during drag
+                transform.x = value.translation.width + lastOffset.width
+                transform.y = value.translation.height + lastOffset.height
+            }
+            .onEnded { value in
+                lastOffset = CGSize(width: transform.x, height: transform.y)
+                onGestureEnd?()
+            }
+    }
+
+    private var magnification: some Gesture {
+        MagnificationGesture(minimumScaleDelta: 0)
+            .onChanged { scale in
+                // Direct assignment for immediate response
+                let newScale = lastScale * scale
+                transform.scale = max(0.1, min(15.0, newScale))  // Allow 10% to 1500% (15x zoom)
+            }
+            .onEnded { scale in
+                lastScale = transform.scale
+                onGestureEnd?()
+            }
+    }
+
+    private var rotation: some Gesture {
+        RotationGesture()
+            .onChanged { angle in
+                transform.rotation = lastRotation + angle.radians
+            }
+            .onEnded { angle in
+                lastRotation = transform.rotation
+                onGestureEnd?()
+            }
+    }
+}
+
+/// Corkboard texture background - UIKit-based for reliable rendering
+private struct CorkboardBackground: UIViewRepresentable {
+    func makeUIView(context: Context) -> CorkImageView {
+        let view = CorkImageView()
+        return view
+    }
+    
+    func updateUIView(_ uiView: CorkImageView, context: Context) {
+        // No updates needed
+    }
+}
+
+private class CorkImageView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+    
+    private func setup() {
+        backgroundColor = UIColor(red: 0.82, green: 0.68, blue: 0.50, alpha: 1.0)
+        clipsToBounds = false // Allow overflow beyond bounds
+        
+        // Try to load and display cork image
+        if let corkImage = loadCorkImage(),
+           let rotatedImage = rotateImage(corkImage, degrees: 90) {
+            let imageView = UIImageView(image: rotatedImage)
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = false // Allow overflow
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(imageView)
+            
+            // Extend the image beyond the view bounds to fill curved edges (more aggressive)
+            NSLayoutConstraint.activate([
+                imageView.topAnchor.constraint(equalTo: topAnchor, constant: -50),
+                imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 50),
+                imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -50),
+                imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 50)
+            ])
+        }
+    }
+    
+    private func rotateImage(_ image: UIImage, degrees: CGFloat) -> UIImage? {
+        let radians = degrees * .pi / 180
+        var newSize = CGRect(origin: .zero, size: image.size)
+            .applying(CGAffineTransform(rotationAngle: radians)).size
+        newSize.width = floor(newSize.width)
+        newSize.height = floor(newSize.height)
+        
+        UIGraphicsBeginImageContextWithOptions(newSize, false, image.scale)
+        guard let context = UIGraphicsGetCurrentContext() else { return nil }
+        
+        context.translateBy(x: newSize.width / 2, y: newSize.height / 2)
+        context.rotate(by: radians)
+        image.draw(in: CGRect(x: -image.size.width / 2, y: -image.size.height / 2,
+                             width: image.size.width, height: image.size.height))
+        
+        let rotatedImage = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return rotatedImage
+    }
+    
+    private func loadCorkImage() -> UIImage? {
+        // Try multiple possible filenames
+        let possibleNames = ["cork", "corkboard", "cork-texture", "cork_texture"]
+        
+        for name in possibleNames {
+            // Try loading from Resources folder
+            if let path = Bundle.main.path(forResource: name, ofType: "jpg"),
+               let image = UIImage(contentsOfFile: path) {
+                return image
+            }
+            if let path = Bundle.main.path(forResource: name, ofType: "png"),
+               let image = UIImage(contentsOfFile: path) {
+                return image
+            }
+        }
+        
+        // Try loading from asset catalog
+        if let image = UIImage(named: "cork") {
+            return image
+        }
+        
+        return nil
+    }
+}
+
+/// Cork grain overlay with configurable density and size
+private struct CorkGrainOverlay: View {
+    let dotCount: Int
+    let sizeRange: ClosedRange<CGFloat>
+    let opacityRange: ClosedRange<Double>
+    var isDark: Bool = false
+    
+    var body: some View {
+        Canvas { context, size in
+            // Create random grain pattern for cork texture
+            for _ in 0..<dotCount {
+                let x = CGFloat.random(in: 0...size.width)
+                let y = CGFloat.random(in: 0...size.height)
+                let opacity = Double.random(in: opacityRange)
+                let radius = CGFloat.random(in: sizeRange)
+                
+                // Vary shapes for more realistic texture
+                let useEllipse = Bool.random()
+                let width = useEllipse ? radius * CGFloat.random(in: 0.6...1.4) : radius
+                let height = useEllipse ? radius * CGFloat.random(in: 0.6...1.4) : radius
+                
+                let color: Color = isDark ? .black : (Bool.random() ? .black : .brown)
+                
+                context.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: width, height: height)),
+                    with: .color(color.opacity(opacity))
+                )
+            }
+        }
+    }
+}
+
+private extension UIApplication {
+    var firstKeyWindow: UIWindow? { connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }.first { $0.isKeyWindow } }
+}
+
+extension Color {
+    init(hex: String) {
+        let r, g, b: Double
+        var hexString = hex
+        if hexString.hasPrefix("#") { hexString.removeFirst() }
+        if hexString.count == 6, let value = UInt64(hexString, radix: 16) {
+            r = Double((value >> 16) & 0xFF) / 255
+            g = Double((value >> 8) & 0xFF) / 255
+            b = Double(value & 0xFF) / 255
+        } else { r = 0; g = 0; b = 0 }
+        self = Color(red: r, green: g, blue: b)
+    }
+    
+    func toHex() -> String? {
+        guard let components = UIColor(self).cgColor.components, components.count >= 3 else {
+            return nil
+        }
+        let r = Int(components[0] * 255.0)
+        let g = Int(components[1] * 255.0)
+        let b = Int(components[2] * 255.0)
+        return String(format: "#%02X%02X%02X", r, g, b)
+    }
+}
+
