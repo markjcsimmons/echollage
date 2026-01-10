@@ -37,7 +37,7 @@ struct DrawingToolbar: View {
             Spacer()
             
             // 8x1 grid toolbar (matches main toolbar style exactly)
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 // 1. Undo (drawing strokes only)
                 ToolbarButton(icon: "arrow.uturn.backward", isAccent: false) {
                     onUndoDrawing()

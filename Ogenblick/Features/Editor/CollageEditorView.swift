@@ -846,7 +846,7 @@ struct CollageEditorView: View {
     
     // Action buttons content - changes based on canvas mode
     private var actionButtonsContent: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 6) {
             if canvasMode == .images {
                 // IMAGE MODE: Full image editing tools
                 imageModeToolbars()
