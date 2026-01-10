@@ -14,6 +14,9 @@ struct MainFlowView: View {
     @State private var showGallery = false
     @State private var viewingProject: Project? // For viewing after save
     @State private var shouldShowViewer = false
+    @AppStorage("hasSeenIntro") private var hasSeenIntro = false
+    @State private var showIntro = false
+    
     
     var body: some View {
         Group {
@@ -42,6 +45,20 @@ struct MainFlowView: View {
                 })
             }
         }
+        .onAppear {
+            print("🎬 MainFlowView onAppear - hasSeenIntro: \(hasSeenIntro)")
+            // Show intro on first launch - check immediately
+            if !hasSeenIntro {
+                print("🎬 Has not seen intro, showing now")
+                // Use immediate dispatch to show intro right away
+                DispatchQueue.main.async {
+                    print("🎬 Setting showIntro to true immediately")
+                    showIntro = true
+                }
+            } else {
+                print("🎬 Intro already seen (hasSeenIntro = true), skipping")
+            }
+        }
         // Hide the default navigation bar and its background so the corkboard
         // can extend fully to the top edge without a white band.
         .toolbar(.hidden, for: .navigationBar)
@@ -66,6 +83,19 @@ struct MainFlowView: View {
                 store.urlForProjectAsset(projectId: project.id, fileName: fileName)
             })
             .environmentObject(store)
+        }
+        .fullScreenCover(isPresented: $showIntro) {
+            IntroView(
+                isPresented: $showIntro,
+                introText: "Some memories live in sound—first notes, laughter, the noise of a place. Échollage weaves audio and images into a collage you can replay, so the moment comes rushing back."
+            )
+            .onDisappear {
+                print("🎬 IntroView disappeared, marking as seen")
+                hasSeenIntro = true
+            }
+        }
+        .onChange(of: showIntro) { newValue in
+            print("🎬 showIntro changed to: \(newValue)")
         }
     }
     

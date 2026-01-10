@@ -32,6 +32,7 @@
 		35D45520FB8C85971DA8B6C0 /* ButtonLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 350E217B6C28D39CDC6DB844 /* ButtonLayout.swift */; };
 		3BC7D19B94A502EF53F05522 /* OgenblickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D056F039E82F457A9B85AD15 /* OgenblickApp.swift */; };
 		3F6D5CDCCB8D853B7E0E226F /* MainFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D0F6C71A21AF73166B4344 /* MainFlowView.swift */; };
+		7A8B9C0D1E2F3A4B5C6D7E8F /* IntroView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B9C0D1E2F3A4B5C6D7E8F9A /* IntroView.swift */; };
 		49FB967B193DCDBC20D5F9AA /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17A34E595BCB94601A22C1F7 /* AudioPlayer.swift */; };
 		4D692AF52EF4970400FB2D3B /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 4D692AF42EF4970400FB2D3B /* GoogleService-Info.plist */; };
 		4D692AFA2EF4B44F00FB2D3B /* Logger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D692AF92EF4B44F00FB2D3B /* Logger.swift */; };
@@ -115,6 +116,7 @@
 		D7ADF844327A61D0F1263306 /* Project.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Project.swift; sourceTree = "<group>"; };
 		DB06ADEE652579136D5B58FB /* MaskEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaskEditorView.swift; sourceTree = "<group>"; };
 		E2D0F6C71A21AF73166B4344 /* MainFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainFlowView.swift; sourceTree = "<group>"; };
+		8B9C0D1E2F3A4B5C6D7E8F9A /* IntroView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntroView.swift; sourceTree = "<group>"; };
 		E3F63A2D1B30E85D20B256D8 /* PencilKitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PencilKitView.swift; sourceTree = "<group>"; };
 		EAA6B83972BE8FF73B2FB6E7 /* DrawingToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrawingToolbar.swift; sourceTree = "<group>"; };
 		F72BA70624CC4E6592A46D72 /* AudioRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
@@ -190,6 +192,7 @@
 				350E217B6C28D39CDC6DB844 /* ButtonLayout.swift */,
 				7FC554DDD229FA80C2146151 /* GalleryView.swift */,
 				E2D0F6C71A21AF73166B4344 /* MainFlowView.swift */,
+				8B9C0D1E2F3A4B5C6D7E8F9A /* IntroView.swift */,
 				BB2D69851FF47E83C7E21C0F /* SharedButtonOverlay.swift */,
 			);
 			path = UI;
@@ -470,6 +473,7 @@
 				10A640106D970BC3DEEC2E54 /* ImageSplitter.swift in Sources */,
 				34B547B897F40CA3CD6C6F6C /* LayerPanel.swift in Sources */,
 				3F6D5CDCCB8D853B7E0E226F /* MainFlowView.swift in Sources */,
+				7A8B9C0D1E2F3A4B5C6D7E8F /* IntroView.swift in Sources */,
 				201FB30DF1B31BC23ADCBBEB /* MaskEditorView.swift in Sources */,
 				D7E595D6C0786659C82C2118 /* MaskedImageEditor.swift in Sources */,
 				3BC7D19B94A502EF53F05522 /* OgenblickApp.swift in Sources */,
