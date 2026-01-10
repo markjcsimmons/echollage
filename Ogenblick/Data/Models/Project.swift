@@ -31,7 +31,7 @@ struct ImageLayer: Codable, Identifiable, Equatable {
     var zIndex: Int = 0
     var erasedImageFileName: String? = nil  // Legacy: previously saved erased raster
     var maskFileName: String? = nil        // New: grayscale mask (white keep, black erase)
-    var drawingDataBase64: String? = nil   // PencilKit drawing bound to this image
+    // Removed: drawingDataBase64 - drawing is now always canvas-wide, not image-specific
 }
 
 struct TextLayer: Codable, Identifiable, Equatable {

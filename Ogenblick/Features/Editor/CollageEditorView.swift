@@ -13,7 +13,6 @@ struct CollageEditorView: View {
     @State private var showPaywall = false
     @State private var showLayerPanel = false
     @State private var showResetConfirmation = false
-    @State private var isDrawing = false
     @State private var drawingData: Data = Data()
     @State private var isExporting = false
     @State private var exportProgress: Double = 0
@@ -24,7 +23,7 @@ struct CollageEditorView: View {
     @State private var editingAudioName = ""
     @State private var showCamera = false
     @State private var showImageSourcePicker = false
-    @State private var showDrawingToolbar = false
+    @State private var isDrawing: Bool = false // Canvas-wide drawing mode (toggled by paint button)
     @State private var selectedTool: DrawingTool = .pen
     @State private var strokeWidth: CGFloat = 8 // Default to "Medium"
     @State private var strokeColor: Color = .white
@@ -40,17 +39,13 @@ struct CollageEditorView: View {
     @State private var tearPathPoints: [(point: CGPoint, pressure: Double)] = []
     @State private var isTearingSelectedImage = false
     @State private var showToolbarForSelectedImage = false
-    @State private var doneClickCount = 0 // Track Done button clicks (1 = ready to save)
+    @State private var doneClickCount = 0 // Track Done button clicks: 0 = initial, 1 = done (checkmark), 2 = ready to share (share icon)
     @State private var isTearProcessing = false
     @State private var lastTearTimestamp: Date = .distantPast // Prevent double-tear
     @State private var isRemovingBackground = false // Track background removal processing
-    
-    // Canvas mode: images (edit images) or canvas (draw on global canvas)
-    enum CanvasMode {
-        case images  // Edit individual images
-        case canvas  // Draw on global canvas
-    }
-    @State private var canvasMode: CanvasMode = .images
+    // Removed: canvasMode - unified toolbar, paint is always canvas-wide
+    // Removed: currentDrawingImageId - drawing is always canvas-wide, not image-specific
+    // Removed: showDrawingToolbar - will show colors inline when paint is active
     
     // Undo stack to support reverting complex actions like split/add/delete
     enum UndoAction {
@@ -58,7 +53,7 @@ struct CollageEditorView: View {
         case addImage(layer: ImageLayer)
         case deleteImage(layer: ImageLayer, index: Int)
         case erase(layerId: UUID, previousFileName: String?)
-        case draw(layerId: UUID, previousDrawingBase64: String?)
+        case draw(previousDrawingBase64: String?) // Canvas-wide drawing only (no layerId needed)
         case addText(layer: TextLayer)
         case deleteText(layer: TextLayer, index: Int)
         case removeBackground(layerId: UUID, backupFileName: String)
@@ -87,8 +82,8 @@ struct CollageEditorView: View {
     
     // Store drawing history for undo (per-image)
     @State private var drawingHistory: [Data] = []
-    @State private var currentDrawingImageId: UUID? = nil // Which image we're drawing on
-    @State private var drawingStateBeforeEdit: String? = nil // Capture state when starting to draw
+    @State private var drawingStateBeforeEdit: String? = nil // Capture state when starting to draw (for canvas drawing only)
+    // Removed: currentDrawingImageId - drawing is always canvas-wide
     
     // Dynamic background based on project backgroundType
     @ViewBuilder
@@ -210,31 +205,35 @@ struct CollageEditorView: View {
             }
             .zIndex(3000)
             
-            // Mode toggle button (top right)
+            // Done button (top right) - replaces canvas mode switch
             VStack {
                 HStack {
                     Spacer()
                     
                     Button {
                         SoundEffectPlayer.shared.playClick()
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            canvasMode = canvasMode == .images ? .canvas : .images
-                            // When switching to canvas mode, deselect any image
-                            if canvasMode == .canvas {
-                                selectedImageId = nil
-                                showToolbarForSelectedImage = false
-                            }
+                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                            handleDoneButtonTap()
                         }
                     } label: {
-                        Image(systemName: canvasMode == .images ? "photo.stack" : "paintpalette.fill")
+                        ZStack {
+                            Circle()
+                                .fill(
+                                    doneClickCount >= 2 ? Color.blue.opacity(0.9) : 
+                                    doneClickCount >= 1 ? Color.green.opacity(0.9) : 
+                                    Color.black.opacity(0.6)
+                                )
+                                .frame(width: 44, height: 44)
+                                .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                            
+                            Image(systemName: 
+                                doneClickCount >= 2 ? "square.and.arrow.up.fill" : 
+                                doneClickCount >= 1 ? "checkmark.circle.fill" : 
+                                "checkmark.circle"
+                            )
                             .font(.system(size: 20, weight: .medium))
                             .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(
-                                Circle()
-                                    .fill(canvasMode == .canvas ? Color.orange.opacity(0.9) : Color.black.opacity(0.6))
-                                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
-                            )
+                        }
                     }
                     .padding(.top, 60)
                     .padding(.trailing, 20)
@@ -294,97 +293,58 @@ struct CollageEditorView: View {
             }
             
             // Drawing toolbar overlay
-            if showDrawingToolbar {
-                DrawingToolbar(
-                    isDrawing: $isDrawing,
-                    selectedTool: $selectedTool,
-                    strokeWidth: $strokeWidth,
-                    strokeColor: $strokeColor,
-                    drawingData: $drawingData,
-                    onUndoDrawing: {
-                        // Undo drawing by restoring previous state
-                        print("🎨 Undo drawing clicked - history count: \(drawingHistory.count)")
-                        print("🎨 Current drawing data size: \(drawingData.count) bytes")
-                        
-                        if drawingHistory.count > 1 {
-                            print("🎨 Removing last state from history")
-                            drawingHistory.removeLast() // Remove current
-                            let previousData = drawingHistory.last ?? Data()
-                            drawingData = previousData
-                            print("🎨 Restored to previous state, size: \(previousData.count) bytes, remaining history: \(drawingHistory.count)")
-                        } else if drawingHistory.count == 1 {
-                            // Clear everything if only one state
-                            print("🎨 Only one state in history, clearing all drawing")
-                            drawingData = Data()
-                            drawingHistory = [Data()]
-                            print("🎨 Cleared all drawing")
-                        } else {
-                            print("⚠️ No history to undo!")
-                        }
-                    },
-                    onClose: {
-                        print("🎨 ✅ Drawing toolbar Done clicked")
-                        print("   currentDrawingImageId: \(String(describing: currentDrawingImageId))")
-                        print("   drawingData size: \(drawingData.count)")
-                        
-                        // Save drawing data to the image layer OR global canvas
-                        if let imageId = currentDrawingImageId,
-                           let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
-                            // Drawing on a specific image
-                            let previousDrawingBase64 = project.imageLayers[idx].drawingDataBase64
-                            
-                            let base64 = drawingData.base64EncodedString()
-                            let newBase64 = base64.isEmpty ? nil : base64
-                            
-                            print("🎨 Image drawing: previous=\(previousDrawingBase64?.prefix(20) ?? "nil"), new=\(newBase64?.prefix(20) ?? "nil")")
-                            
-                            // Only add to undo stack if drawing actually changed
-                            if previousDrawingBase64 != newBase64 {
-                                undoStack.append(.draw(layerId: imageId, previousDrawingBase64: previousDrawingBase64))
-                                print("🎨 ✅ Added image drawing to undo stack")
-                            } else {
-                                print("⚠️ Image drawing unchanged")
+            // Inline color picker when paint is active (replaces DrawingToolbar)
+            if isDrawing {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 6) {
+                        // Undo button for drawing
+                        ToolbarGridButton(
+                            icon: "arrow.uturn.backward",
+                            isDisabled: drawingHistory.count <= 1
+                        ) {
+                            SoundEffectPlayer.shared.playClick()
+                            if drawingHistory.count > 1 {
+                                drawingHistory.removeLast() // Remove current
+                                let previousData = drawingHistory.last ?? Data()
+                                drawingData = previousData
+                                print("🎨 Undid drawing stroke")
+                            } else if drawingHistory.count == 1 {
+                                drawingData = Data()
+                                drawingHistory = [Data()]
+                                print("🎨 Cleared all drawing")
                             }
-                            
-                            project.imageLayers[idx].drawingDataBase64 = newBase64
-                            store.update(project)
-                            print("🎨 Saved drawing to image: \(imageId), data size: \(drawingData.count) bytes")
-                        } else {
-                            // Drawing on global canvas (currentDrawingImageId is nil)
-                            print("🎨 Saving global canvas drawing")
-                            
-                            // Use the captured state from BEFORE we started drawing
-                            let previousDrawingBase64 = drawingStateBeforeEdit
-                            
-                            let base64 = drawingData.base64EncodedString()
-                            let newBase64 = base64.isEmpty ? nil : base64
-                            
-                            print("🎨 Canvas drawing: previous=\(previousDrawingBase64?.prefix(20) ?? "nil"), new=\(newBase64?.prefix(20) ?? "nil")")
-                            
-                            // Add to undo stack if drawing changed
-                            if previousDrawingBase64 != newBase64 {
-                                let dummyId = UUID()
-                                undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
-                                print("🎨 ✅ Added global canvas drawing to undo stack (layerId: \(dummyId))")
-                                print("🔄 Undo stack now has \(undoStack.count) items")
-                            } else {
-                                print("⚠️ Drawing unchanged, not adding to undo stack")
-                            }
-                            
-                            project.drawingDataBase64 = newBase64
-                            store.update(project)
-                            print("🎨 Saved drawing to global canvas, data size: \(drawingData.count) bytes")
-                            
-                            // Clear the captured state
-                            drawingStateBeforeEdit = nil
                         }
                         
-                        currentDrawingImageId = nil
-                        showDrawingToolbar = false
-                        isDrawing = false
-                        selectedTool = .pen // Reset tool to prevent continued erasing
+                        // Color buttons (6 colors)
+                        ForEach([Color.white, .black, .red, .yellow, .blue, .purple], id: \.self) { color in
+                            Button {
+                                SoundEffectPlayer.shared.playClick()
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    strokeColor = color
+                                }
+                            } label: {
+                                Circle()
+                                    .fill(color)
+                                    .frame(width: 44, height: 44)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(strokeColor == color ? Color.white : Color.white.opacity(0.3), lineWidth: strokeColor == color ? 2.5 : 1)
+                                    )
+                                    .shadow(color: strokeColor == color ? color.opacity(0.6) : Color.black.opacity(0.25), radius: strokeColor == color ? 4 : 2, y: 2)
+                                    .scaleEffect(strokeColor == color ? 1.1 : 1.0)
+                            }
+                        }
                     }
-                )
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18)
+                            .fill(.ultraThinMaterial)
+                            .shadow(color: Color.black.opacity(0.3), radius: 20, y: 10)
+                    )
+                    .padding(.bottom, 30)
+                    .padding(.horizontal, 16)
+                }
                 .transition(.move(edge: .bottom))
             }
         }
@@ -586,52 +546,11 @@ struct CollageEditorView: View {
                             .frame(width: baseSize.width, height: baseSize.height)
                             .id("erasable-\(layer.id)") // Stable identity
                             
-                            // Drawing overlay (bound to this image) - show saved drawing
-                            if let drawingBase64 = layer.drawingDataBase64,
-                               let drawingDataForImage = Data(base64Encoded: drawingBase64),
-                               currentDrawingImageId != layer.id { // Don't show saved drawing while actively drawing on this image
-                                ImageBoundDrawingView(
-                                    drawingData: drawingDataForImage,
-                                    imageSize: baseSize,
-                                    isInteractive: false
-                                )
-                                .frame(width: baseSize.width, height: baseSize.height)
-                                .allowsHitTesting(false)
-                                .id("drawing-\(layer.id)-\(drawingBase64.prefix(20))-\(refreshTrigger)") // Force recreation when drawing changes or refresh triggered
-                            }
-                            
-                            // Active PencilKit drawing canvas - positioned exactly on top of image
-                            // CRITICAL: Supports both drawing AND erasing drawings (PencilKit erase mode)
-                            // Note: Image erasing (erasing parts of the image itself) uses PressureEraseView separately
-                            // Both image drawing erase and global canvas drawing erase use the same drawingData binding
-                            // so they benefit from the same fixes (no auto-save, Done button saves to correct place)
-                            if isDrawing && currentDrawingImageId == layer.id {
-                                PencilKitView(
-                                    drawingData: $drawingData,
-                                    isDrawingEnabled: true,
-                                    isEraseMode: false, // Currently always false (image erase uses PressureEraseView)
-                                    strokeColor: strokeColor,
-                                    strokeWidth: strokeWidth,
-                                    expectedSize: baseSize, // CRITICAL: Pass expected size for bounds matching
-                                    onDrawingChanged: { newData in
-                                        print("🎨 Image drawing changed, data size: \(newData.count) bytes")
-                                        if !drawingHistory.isEmpty && drawingHistory.last == newData {
-                                            print("🎨 Skipping duplicate")
-                                            return
-                                        }
-                                        drawingHistory.append(newData)
-                                        print("🎨 Added to history, total states: \(drawingHistory.count)")
-                                    }
-                                )
-                                .id("pencilkit-image-\(layer.id)-\(drawingData.count)")
-                                .frame(width: baseSize.width, height: baseSize.height)
-                                .allowsHitTesting(true)
-                                .zIndex(2000) // Above everything when drawing to receive all touches
-                            }
+                            // Removed: Image-specific drawing rendering (drawing is now always canvas-wide)
                             
                             // Selection border - fit to actual content bounds if image has transparency
-                            // Hide border when actively drawing on this image
-                            if selectedImageId == layer.id && !(isDrawing && currentDrawingImageId == layer.id) {
+                            // Hide border when actively drawing (canvas-wide drawing)
+                            if selectedImageId == layer.id && !isDrawing {
                                 let borderSize = imageHasTransparency(ui) ? tightBoundsSize(for: ui, baseSize: baseSize) : baseSize
                                 RoundedRectangle(cornerRadius: 8)
                                     .stroke(Color.blue, lineWidth: 3)
@@ -639,8 +558,8 @@ struct CollageEditorView: View {
                                     .allowsHitTesting(false)
                             }
                             
-                            // Gesture overlay (only when NOT erasing and NOT drawing on this image)
-                            if !isErasing && !(isDrawing && currentDrawingImageId == layer.id) {
+                            // Gesture overlay (only when NOT erasing and NOT drawing canvas-wide)
+                            if !isErasing && !isDrawing {
                                 Group {
                                     if selectedTool == .tear {
                                         // Tear mode: only tap to select, no transform gestures
@@ -692,8 +611,8 @@ struct CollageEditorView: View {
                                                         // Reset tool state when selecting a new image (no tools active)
                                                         selectedTool = .pen
                                                         isDrawing = false
-                                                        showDrawingToolbar = false
-                                                        currentDrawingImageId = nil
+                                                        // Reset drawing when selecting image
+                                                        isDrawing = false
                                                         withAnimation(.easeInOut(duration: 0.2)) {
                                                             selectedImageId = layer.id
                                                             showToolbarForSelectedImage = true
@@ -715,7 +634,7 @@ struct CollageEditorView: View {
                         .scaleEffect(project.imageLayers[idx].transform.scale)
                         .rotationEffect(.radians(project.imageLayers[idx].transform.rotation))
                         .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
-                        .opacity(canvasMode == .canvas && isDrawing && currentDrawingImageId == nil ? 0.6 : 1.0) // Dim only when drawing on global canvas (helps see paint)
+                        .opacity(isDrawing ? 0.6 : 1.0) // Dim images when drawing canvas-wide (helps see paint)
                         .zIndex(Double(layer.zIndex))
                         .id("\(layer.id)-\(layer.imageFileName)-\(refreshTrigger)")
                     }
@@ -753,9 +672,8 @@ struct CollageEditorView: View {
                     .zIndex(2000 + Double(layer.zIndex)) // High zIndex to render on top, but only captures touches on actual text
                 }
                 
-                // Show saved global canvas drawing (only when NOT drawing at all, to avoid conflicts)
-                // CRITICAL: Only show when NOT drawing on anything (not image, not canvas)
-                if !isDrawing && currentDrawingImageId == nil, 
+                // Show saved canvas-wide drawing (only when NOT actively drawing, to avoid conflicts)
+                if !isDrawing, 
                    let base64 = project.drawingDataBase64,
                    let drawingDataForCanvas = Data(base64Encoded: base64),
                    !drawingDataForCanvas.isEmpty {
@@ -769,22 +687,17 @@ struct CollageEditorView: View {
                     .zIndex(500) // Above images, below active drawing
                 }
                 
-                // PencilKit drawing layer - global canvas drawing ONLY (image-specific drawing is inside image ZStack)
-                // CRITICAL: Only show when actively drawing on global canvas (currentDrawingImageId must be nil)
-                // Supports both drawing AND erasing drawings on global canvas
-                // Both image drawing erase and global canvas drawing erase use the same drawingData binding
-                // so they benefit from the same fixes (no auto-save, Done button saves to correct place)
-                if isDrawing && currentDrawingImageId == nil {
-                    // GLOBAL CANVAS DRAWING
+                // PencilKit drawing layer - canvas-wide drawing (always canvas-wide, never image-specific)
+                if isDrawing {
                     PencilKitView(
                         drawingData: $drawingData,
                         isDrawingEnabled: true,
-                        isEraseMode: false, // Currently always false, but if enabled would use same drawingData binding
+                        isEraseMode: selectedTool == .erase, // Enable erase mode when erase tool is selected
                         strokeColor: strokeColor,
                         strokeWidth: strokeWidth,
                         expectedSize: canvasSize, // CRITICAL: Pass expected size for bounds matching
                         onDrawingChanged: { newData in
-                            print("🎨 Global canvas drawing changed, data size: \(newData.count) bytes")
+                            print("🎨 Canvas drawing changed, data size: \(newData.count) bytes")
                             if !drawingHistory.isEmpty && drawingHistory.last == newData {
                                 print("🎨 Skipping duplicate")
                                 return
@@ -796,7 +709,7 @@ struct CollageEditorView: View {
                     .id("pencilkit-canvas-\(drawingData.count)")
                     .frame(width: canvasSize.width, height: canvasSize.height)
                     .allowsHitTesting(true)
-                    .zIndex(1000)
+                    .zIndex(1000) // Above saved drawing and images
                 }
                 
                 // Tear gesture overlay when image is selected - with pressure sensitivity
@@ -811,8 +724,9 @@ struct CollageEditorView: View {
                            .zIndex(1000)
                        }
                        
-                       // Erase gesture overlay when image is selected and erase tool active
-                       if selectedTool == .erase && selectedImageId != nil {
+                       // Erase gesture overlay when image is selected and erase tool active (but NOT when drawing canvas-wide)
+                       // When drawing is active, use PencilKit erase mode instead
+                       if selectedTool == .erase && selectedImageId != nil && !isDrawing {
                            PressureSensitiveEraseOverlay(
                                selectedImageId: selectedImageId,
                                project: $project,
@@ -844,56 +758,51 @@ struct CollageEditorView: View {
                }
            }
     
-    // Action buttons content - changes based on canvas mode
+    // Unified toolbar - always visible (no mode switching needed)
     private var actionButtonsContent: some View {
         HStack(spacing: 6) {
-            if canvasMode == .images {
-                // IMAGE MODE: Full image editing tools
-                imageModeToolbars()
-            } else {
-                // CANVAS MODE: Simplified canvas drawing tools
-                canvasModeToolbars()
-            }
+            unifiedToolbar()
         }
     }
     
-    // Image mode toolbar (6 buttons)
+    // Unified toolbar (always visible, no mode switching)
     @ViewBuilder
-    private func imageModeToolbars() -> some View {
-            // 1. Undo (disabled when drawing - use drawing toolbar undo instead)
+    private func unifiedToolbar() -> some View {
+            // 1. Undo
             ToolbarGridButton(
                 icon: "arrow.uturn.backward",
-                isDisabled: undoStack.isEmpty || isDrawing
+                isDisabled: undoStack.isEmpty || isDrawing // Disable when drawing (use drawing undo instead)
             ) {
                 undoLastAction()
             }
             
-            // 2. Add Image (disabled when big button showing OR when 10 images)
+            // 2. Add Image
             ToolbarGridButton(
                 icon: "photo",
                 isDisabled: project.imageLayers.isEmpty || project.imageLayers.count >= 10,
-                shouldThrob: false // No throb, big button is visible
+                shouldThrob: false
             ) {
                 showImageSourcePicker = true
+                // Deactivate any active tools when adding image
                 selectedTool = .pen
-                showDrawingToolbar = false
+                isDrawing = false
             }
             
-            // 3. Mask/Remove Background (always visible, disabled if no image selected) - throb if image selected and no mask/erase/design used yet
+            // 3. Mask/Remove Background (disabled if no image selected)
             ToolbarGridButton(
                 icon: "person.crop.circle.fill",
                 isDisabled: !showToolbarForSelectedImage || isRemovingBackground,
                 shouldThrob: showToolbarForSelectedImage && doneClickCount == 0,
-                isSelected: false // Mask is not a persistent tool state
+                isSelected: false
             ) {
                 guard let imageId = selectedImageId else { return }
                 print("🎭 Mask button clicked - removing background for image: \(imageId)")
                 autoRemoveBackground(for: imageId)
-                selectedTool = .pen // Reset tool after mask action
-                showDrawingToolbar = false
+                selectedTool = .pen
+                isDrawing = false
             }
             
-            // 4. Erase (always visible, disabled if no image selected) - toggle on/off
+            // 4. Erase (image-specific, disabled if no image selected) - toggle on/off
             ToolbarGridButton(
                 icon: "eraser",
                 isDisabled: !showToolbarForSelectedImage,
@@ -903,260 +812,62 @@ struct CollageEditorView: View {
                 // Toggle: if already erase, deactivate; otherwise activate
                 if selectedTool == .erase {
                     selectedTool = .pen
-                    showDrawingToolbar = false
+                    isDrawing = false
                     print("🧹 Erase deactivated")
                 } else {
                     selectedTool = .erase
-                    showDrawingToolbar = false
+                    isDrawing = false // Erase doesn't use drawing mode
                     print("🧹 Erase activated")
                 }
             }
             
-            // 5. Design/Draw (always visible, disabled if no image selected) - toggle on/off
+            // 5. Paint (canvas-wide, always available) - toggle on/off
             ToolbarGridButton(
                 icon: "paintbrush",
-                isDisabled: !showToolbarForSelectedImage,
-                isSelected: (selectedTool == .pen || selectedTool == .brush) && isDrawing && currentDrawingImageId == selectedImageId
+                isDisabled: false,
+                isSelected: isDrawing // Selected when actively drawing (canvas-wide)
             ) {
-                guard let imageId = selectedImageId,
-                      let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) else { return }
-                
-                // Toggle: if already drawing on this image, deactivate; otherwise activate
-                if isDrawing && currentDrawingImageId == imageId && (selectedTool == .pen || selectedTool == .brush) {
-                    // Deactivate drawing
+                // Toggle: if already drawing, deactivate; otherwise activate
+                if isDrawing && (selectedTool == .pen || selectedTool == .brush) {
+                    // Deactivate drawing - save current drawing first
+                    handleDoneDrawing()
                     selectedTool = .pen
-                    showDrawingToolbar = false
                     isDrawing = false
-                    currentDrawingImageId = nil
-                    print("🎨 Drawing deactivated for image: \(imageId)")
+                    print("🎨 Paint deactivated")
                 } else {
-                    // Activate drawing
+                    // Activate canvas-wide drawing
                     selectedTool = .pen
-                    showDrawingToolbar = true
                     isDrawing = true
-                    currentDrawingImageId = imageId
                     
-                    // CAPTURE THE STATE BEFORE DRAWING STARTS
-                    drawingStateBeforeEdit = project.imageLayers[idx].drawingDataBase64
+                    // Capture state before drawing starts
+                    drawingStateBeforeEdit = project.drawingDataBase64
+                    print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
                     
-                    // Load existing drawing for this image
-                    if let base64 = project.imageLayers[idx].drawingDataBase64,
+                    // Load existing canvas drawing
+                    if let base64 = project.drawingDataBase64,
                        let data = Data(base64Encoded: base64) {
                         drawingData = data
                         drawingHistory = [data]
                     } else {
-                        // Start fresh
                         drawingData = Data()
                         drawingHistory = [Data()]
                     }
                     
-                    print("🎨 Started drawing on image: \(imageId)")
+                    print("🎨 Started canvas-wide drawing")
                 }
             }
             
-            // 6. Done / Save
-            if doneClickCount >= 1 {
-                // Show bigger green SAVE button
-                Button {
-                    store.update(project)
-                    onSave?()
-                    doneClickCount = 0 // Reset for next project
-                } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 60, height: 60)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                }
-            } else {
-                // Regular Done button
-            ToolbarGridButton(icon: "checkmark", isAccent: true) {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                    // Close drawing toolbar if open
-                    if showDrawingToolbar {
-                        showDrawingToolbar = false
-                        isDrawing = false
-                        
-                        // Save drawing data to the image layer
-                        if let imageId = currentDrawingImageId,
-                           let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
-                            let base64 = drawingData.base64EncodedString()
-                            project.imageLayers[idx].drawingDataBase64 = base64.isEmpty ? nil : base64
-                            store.update(project)
-                            print("🎨 Saved drawing to image: \(imageId)")
-                        }
-                        currentDrawingImageId = nil
-                    }
-                    
-                    // Deactivate any active tool
-                    selectedTool = .pen // Reset to default (non-active) tool
-                    
-                    // Clear image selection and tool visibility
-                    selectedImageId = nil
-                    showToolbarForSelectedImage = false
-                        
-                        // Increment done click count
-                        doneClickCount += 1
-                    
-                    // Also ensure erase mode is disabled
-                    isDrawing = false
-                    }
-                }
-            }
-    }
-    
-    // Canvas mode toolbar (4 buttons - simplified)
-    @ViewBuilder
-    private func canvasModeToolbars() -> some View {
-        // 1. Undo (use regular undo stack - works for text, drawing, etc)
-        ToolbarGridButton(
-            icon: "arrow.uturn.backward",
-            isDisabled: undoStack.isEmpty
-        ) {
-            undoLastAction()
-        }
-        
-        // 2. Design (draw on global canvas) - toggle on/off
-        ToolbarGridButton(
-            icon: "paintbrush",
-            isDisabled: false,
-            isSelected: isDrawing && currentDrawingImageId == nil // Selected when drawing on global canvas
-        ) {
-            // Toggle: if already drawing on global canvas, deactivate; otherwise activate
-            if isDrawing && currentDrawingImageId == nil && (selectedTool == .pen || selectedTool == .brush) {
-                // Deactivate drawing
-                selectedTool = .pen
-                showDrawingToolbar = false
+            // 6. Text (canvas-wide, always available)
+            ToolbarGridButton(
+                icon: "textformat",
+                isDisabled: false,
+                isSelected: false // Text is not a persistent tool state
+            ) {
+                addTextLayer()
+                // Deactivate drawing when adding text
                 isDrawing = false
-                currentDrawingImageId = nil
-                print("🎨 Drawing deactivated on global canvas")
-            } else {
-                // Activate drawing
                 selectedTool = .pen
-                showDrawingToolbar = true
-                isDrawing = true
-                currentDrawingImageId = nil // Draw on global canvas
-                
-                // CAPTURE THE STATE BEFORE DRAWING STARTS
-                drawingStateBeforeEdit = project.drawingDataBase64
-                print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
-                
-                // Load existing global drawing
-                if let base64 = project.drawingDataBase64,
-                   let data = Data(base64Encoded: base64) {
-                    drawingData = data
-                    drawingHistory = [data]
-                } else {
-                    // Start fresh
-                    drawingData = Data()
-                    drawingHistory = [Data()]
-                }
-                
-                print("🎨 Started drawing on global canvas")
             }
-        }
-        
-        // 3. Text
-        ToolbarGridButton(
-            icon: "textformat",
-            isDisabled: false,
-            isSelected: false // Text is not a persistent tool state
-        ) {
-            addTextLayer()
-        }
-        
-        // 4. Done / Save
-        if doneClickCount >= 1 {
-            // Show bigger green SAVE button
-            Button {
-                store.update(project)
-                onSave?()
-                doneClickCount = 0 // Reset for next project
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 60, height: 60)
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 28, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-            }
-        } else {
-            // Regular Done button
-        ToolbarGridButton(icon: "checkmark", isAccent: true) {
-                print("✅ Done button clicked in canvas mode")
-                print("   showDrawingToolbar: \(showDrawingToolbar)")
-                print("   isDrawing: \(isDrawing)")
-                print("   currentDrawingImageId: \(String(describing: currentDrawingImageId))")
-                print("   drawingData size: \(drawingData.count)")
-                print("   project.drawingDataBase64: \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                    // CRITICAL: Check if we're drawing on an image first
-                    // If drawing on an image, save to image layer (NOT global canvas)
-                    if let imageId = currentDrawingImageId,
-                       let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
-                        // Drawing on a specific image - save to image layer
-                        let previousDrawingBase64 = project.imageLayers[idx].drawingDataBase64
-                        let base64 = drawingData.base64EncodedString()
-                        let newBase64 = base64.isEmpty ? nil : base64
-                        
-                        // Only add to undo stack if drawing actually changed
-                        if previousDrawingBase64 != newBase64 {
-                            undoStack.append(.draw(layerId: imageId, previousDrawingBase64: previousDrawingBase64))
-                            print("🎨 ✅ Done: Added image drawing to undo stack")
-                        }
-                        
-                        project.imageLayers[idx].drawingDataBase64 = newBase64
-                        store.update(project)
-                        print("🎨 Done: Saved drawing to image: \(imageId), data size: \(drawingData.count) bytes")
-                    } else {
-                        // Drawing on global canvas (currentDrawingImageId is nil)
-                        // Save drawing even if toolbar is closed (user may have closed it already)
-                        let previousDrawingBase64 = project.drawingDataBase64
-                        let base64 = drawingData.base64EncodedString()
-                        let newBase64 = base64.isEmpty ? nil : base64
-                        
-                        // Add to undo stack if there's ANY drawing data (new or changed)
-                        if newBase64 != nil && previousDrawingBase64 != newBase64 {
-                            let dummyId = UUID()
-                            undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
-                            print("🎨 Added global canvas drawing to undo stack (layerId: \(dummyId))")
-                            print("🔄 Undo stack now has \(undoStack.count) items")
-                        } else if newBase64 == nil {
-                            print("⚠️ No drawing data to save")
-                        } else {
-                            print("⚠️ Drawing unchanged, not adding to undo stack")
-                        }
-                        
-                        // Save the drawing
-                        if newBase64 != nil {
-                            project.drawingDataBase64 = newBase64
-                            store.update(project)
-                            print("🎨 Saved drawing to global canvas")
-                        }
-                    }
-                    
-                // Close drawing toolbar if open
-                if showDrawingToolbar {
-                    showDrawingToolbar = false
-                    isDrawing = false
-                    currentDrawingImageId = nil
-                }
-                
-                // Reset tool
-                selectedTool = .pen
-                isDrawing = false
-                    
-                    // Increment done click count
-                    doneClickCount += 1
-                }
-            }
-        }
     }
     
     // Individual grid button with 3D shadow effect
@@ -1866,10 +1577,8 @@ struct CollageEditorView: View {
         // Reset tool state when images are added - no tools should be active
         selectedTool = .pen
         isDrawing = false
-        showDrawingToolbar = false
         selectedImageId = nil
         showToolbarForSelectedImage = false
-        currentDrawingImageId = nil
         
         store.update(project)
     }
@@ -2055,6 +1764,95 @@ struct CollageEditorView: View {
         }
     }
 
+    // Handle Done button tap (moved to top right)
+    // First click: marks as done (shows checkmark), saves state
+    // Second click: shows share icon and triggers export
+    private func handleDoneButtonTap() {
+        print("✅ Done button clicked, current count: \(doneClickCount)")
+        
+        if doneClickCount == 0 {
+            // First click: Save everything and mark as done
+            print("   First click - saving state and marking as done")
+            
+            // Save current drawing if active
+            if isDrawing {
+                handleDoneDrawing()
+            }
+            
+            // Save project state
+            store.update(project)
+            
+            // Reset tool state
+            selectedTool = .pen
+            isDrawing = false
+            
+            // Clear image selection
+            selectedImageId = nil
+            showToolbarForSelectedImage = false
+            
+            // Increment to show checkmark (doneClickCount = 1)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                doneClickCount = 1
+            }
+        } else if doneClickCount == 1 {
+            // Second click: Show share icon and trigger export
+            print("   Second click - showing share icon and exporting")
+            
+            // Increment to show share icon (doneClickCount = 2)
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                doneClickCount = 2
+            }
+            
+            // Trigger export
+            Task {
+                await export()
+                // After export completes, reset for next time
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                        doneClickCount = 0
+                    }
+                }
+            }
+        } else {
+            // doneClickCount >= 2: Already showing share icon, just export again
+            print("   Already in share mode - exporting again")
+            Task {
+                await export()
+            }
+        }
+    }
+    
+    // Save canvas-wide drawing when done (called from paint button or done button)
+    private func handleDoneDrawing() {
+        guard isDrawing else { return }
+        
+        let previousDrawingBase64 = project.drawingDataBase64
+        let base64 = drawingData.base64EncodedString()
+        let newBase64 = base64.isEmpty ? nil : base64
+        
+        // Add to undo stack if drawing changed
+        if previousDrawingBase64 != newBase64 {
+            undoStack.append(.draw(previousDrawingBase64: previousDrawingBase64))
+            print("🎨 Added canvas drawing to undo stack")
+        }
+        
+        // Save the drawing
+        project.drawingDataBase64 = newBase64
+        store.update(project)
+        
+        // Update drawingData to match saved state
+        if let savedData = newBase64, let data = Data(base64Encoded: savedData) {
+            drawingData = data
+            drawingHistory = [data]
+        } else {
+            drawingData = Data()
+            drawingHistory = [Data()]
+        }
+        
+        drawingStateBeforeEdit = nil
+        print("🎨 Saved canvas drawing, data size: \(drawingData.count) bytes")
+    }
+    
     private func addTextLayer() {
         // Don't play click here - button already plays it
         
@@ -2263,7 +2061,7 @@ struct CollageEditorView: View {
         
         // If done button has been clicked, undo should deselect done instead of undoing previous action
         if doneClickCount >= 1 {
-            print("🔄 Done is active - deselecting done instead of undoing previous action")
+            print("🔄 Done is active (count: \(doneClickCount)) - deselecting done instead of undoing previous action")
             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
                 doneClickCount = 0
             }
@@ -2354,48 +2152,30 @@ struct CollageEditorView: View {
                 }
                 return
                 
-            case let .draw(layerId, previousDrawingBase64):
-                // Restore previous drawing state
-                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
-                    // Undo drawing on a specific image
-                    project.imageLayers[idx].drawingDataBase64 = previousDrawingBase64
-                    
-                    // Clear cache and force refresh to ensure the updated drawing is displayed
-                    imageCache.removeValue(forKey: project.imageLayers[idx].imageFileName)
-                    refreshTrigger = UUID()
-                    
-                    store.update(project)
-                    print("🎨 Undid drawing on image: \(layerId)")
+            case let .draw(previousDrawingBase64):
+                // Undo canvas-wide drawing (always canvas-wide, never image-specific)
+                print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
+                
+                project.drawingDataBase64 = previousDrawingBase64
+                if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
+                    self.drawingData = drawingData
+                    drawingHistory = [drawingData]
+                    print("🎨 Restored drawing data: \(drawingData.count) bytes")
                 } else {
-                    // Undo global canvas drawing
-                    print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                    print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
-                    
-                    project.drawingDataBase64 = previousDrawingBase64
-                    if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
-                        self.drawingData = drawingData
-                        print("🎨 Restored drawing data: \(drawingData.count) bytes")
-                    } else {
-                        self.drawingData = Data()
-                        print("🎨 Cleared drawing data (no previous drawing)")
-                    }
-                    
-                    // Force view refresh
-                    self.refreshTrigger = UUID()
-                    
-                    // Update store AFTER setting the data
-                    store.update(project)
-                    
-                    print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                    print("🎨 Undid drawing on global canvas - drawing data now: \(self.drawingData.count) bytes")
-                    
-                    // Double-check the store has the updated project
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        if let storedProject = self.store.projects.first(where: { $0.id == self.project.id }) {
-                            print("🔍 Store verification: stored project.drawingDataBase64 = \(storedProject.drawingDataBase64?.prefix(20) ?? "nil")")
-                        }
-                    }
+                    self.drawingData = Data()
+                    drawingHistory = [Data()]
+                    print("🎨 Cleared drawing data (no previous drawing)")
                 }
+                
+                // Force view refresh
+                self.refreshTrigger = UUID()
+                
+                // Update store AFTER setting the data
+                store.update(project)
+                
+                print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                print("🎨 Undid canvas drawing - drawing data now: \(self.drawingData.count) bytes")
                 return
             case let .addText(layer):
                 // Remove the added text
