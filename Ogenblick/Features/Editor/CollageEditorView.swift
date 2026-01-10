@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import AVKit
 import UIKit
 
 struct CollageEditorView: View {
@@ -97,6 +98,32 @@ struct CollageEditorView: View {
             Color(red: 0.53, green: 0.81, blue: 0.98) // Sky blue
         case .black:
             Color.black
+        case .psych:
+            PsychBackground()
+        case .orange:
+            ImageBackground(imageName: "orange", imageType: "png")
+        case .pattern:
+            ImageBackground(imageName: "pattern", imageType: "jpg")
+        case .stripes:
+            ImageBackground(imageName: "stripes", imageType: "jpg")
+        case .colored:
+            ImageBackground(imageName: "colored-7292420_1920", imageType: "jpg")
+        case .psychedelic:
+            ImageBackground(imageName: "psychedelic-9957735_1920", imageType: "jpg")
+        case .floralPattern:
+            ImageBackground(imageName: "floral-pattern-7411179_1280", imageType: "png")
+        case .texture:
+            ImageBackground(imageName: "texture-794826_1280", imageType: "png")
+        case .watercolor:
+            ImageBackground(imageName: "watercolor-7129105_1920", imageType: "png")
+        case .fireworks:
+            VideoBackground(videoName: "fireworks")
+        case .mountains:
+            VideoBackground(videoName: "mountains")
+        case .waves:
+            VideoBackground(videoName: "waves")
+        case .tiny:
+            VideoBackground(videoName: "214784_tiny")
         }
     }
     
@@ -112,6 +139,32 @@ struct CollageEditorView: View {
             case .skyBlue:
                 project.backgroundType = .black
             case .black:
+                project.backgroundType = .psych
+            case .psych:
+                project.backgroundType = .orange
+            case .orange:
+                project.backgroundType = .pattern
+            case .pattern:
+                project.backgroundType = .stripes
+            case .stripes:
+                project.backgroundType = .colored
+            case .colored:
+                project.backgroundType = .psychedelic
+            case .psychedelic:
+                project.backgroundType = .floralPattern
+            case .floralPattern:
+                project.backgroundType = .texture
+            case .texture:
+                project.backgroundType = .watercolor
+            case .watercolor:
+                project.backgroundType = .fireworks
+            case .fireworks:
+                project.backgroundType = .mountains
+            case .mountains:
+                project.backgroundType = .waves
+            case .waves:
+                project.backgroundType = .tiny
+            case .tiny:
                 project.backgroundType = .corkboard
             }
         }
@@ -150,7 +203,18 @@ struct CollageEditorView: View {
             backgroundView
                 .ignoresSafeArea(.all)
                 .onTapGesture {
-                    cycleBackground()
+                    // If paint tool is active, tap to deselect it; otherwise cycle backgrounds
+                    if isDrawing {
+                        print("🎨 Background tapped while paint active - deselecting paint tool")
+                        SoundEffectPlayer.shared.playClick()
+                        handleDoneDrawing() // Save current drawing
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            isDrawing = false
+                            selectedTool = .pen
+                        }
+                    } else {
+                        cycleBackground()
+                    }
                 }
             
             // Canvas area (transparent, shows cork behind) - fills entire screen
@@ -519,6 +583,7 @@ struct CollageEditorView: View {
             let canvasSize = geometry.size
             ZStack {
                 // Always transparent to show corkboard background
+                // Note: When paint is active, tapping background (above) will deselect paint
                 Color.clear
                 
                 ForEach(project.imageLayers.sorted(by: { $0.zIndex < $1.zIndex })) { layer in
@@ -704,6 +769,16 @@ struct CollageEditorView: View {
                             }
                             drawingHistory.append(newData)
                             print("🎨 Added to history, total states: \(drawingHistory.count)")
+                        },
+                        onTapOnly: {
+                            // When user taps canvas (not draws), deselect paint tool
+                            print("🎨 Canvas tapped (not drawn) while paint active - deselecting paint tool")
+                            SoundEffectPlayer.shared.playClick()
+                            handleDoneDrawing() // Save current drawing
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                isDrawing = false
+                                selectedTool = .pen
+                            }
                         }
                     )
                     .id("pencilkit-canvas-\(drawingData.count)")
@@ -3017,6 +3092,349 @@ private class CorkImageView: UIView {
         }
         
         return nil
+    }
+}
+
+/// Psych background - UIKit-based for reliable rendering
+private struct PsychBackground: UIViewRepresentable {
+    func makeUIView(context: Context) -> PsychImageView {
+        let view = PsychImageView()
+        return view
+    }
+    
+    func updateUIView(_ uiView: PsychImageView, context: Context) {
+        // No updates needed
+    }
+}
+
+private class PsychImageView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setup()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+    
+    private func setup() {
+        print("🎨 PsychImageView setup() called")
+        clipsToBounds = false // Allow overflow beyond bounds
+        
+        // Try to load and display psych image
+        if let psychImage = loadPsychImage() {
+            print("🎨 Setting up psych image view with image, size: \(psychImage.size)")
+            backgroundColor = UIColor.clear
+            let imageView = UIImageView(image: psychImage)
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = false // Allow overflow
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(imageView)
+            
+            // Extend the image beyond the view bounds to fill curved edges
+            NSLayoutConstraint.activate([
+                imageView.topAnchor.constraint(equalTo: topAnchor, constant: -50),
+                imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 50),
+                imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -50),
+                imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 50)
+            ])
+            print("🎨 Psych image view setup complete")
+        } else {
+            // Fallback: Use a distinctive purple background so user knows it's psych background
+            // This indicates the image file isn't being loaded from the bundle
+            print("⚠️ Psych image not loaded - showing purple fallback background")
+            print("   NOTE: psych.jpg needs to be added to Xcode project to be included in app bundle")
+            backgroundColor = UIColor(red: 0.3, green: 0.1, blue: 0.5, alpha: 1.0) // Purple fallback
+        }
+    }
+    
+    private func loadPsychImage() -> UIImage? {
+        // Try multiple possible names and methods (matching cork approach)
+        let possibleNames = ["psych", "psych.jpg", "psych.png"]
+        
+        // First try UIImage(named:) - this is most reliable if file is in bundle
+        for name in possibleNames {
+            if let image = UIImage(named: name) {
+                print("🎨 Found psych image using UIImage(named: \"\(name)\"), size: \(image.size)")
+                return image
+            }
+        }
+        
+        // Then try loading from Resources folder path
+        if let path = Bundle.main.path(forResource: "psych", ofType: "jpg") {
+            print("🎨 Found psych.jpg at path: \(path)")
+            if let image = UIImage(contentsOfFile: path) {
+                print("🎨 Successfully loaded psych.jpg from path, size: \(image.size)")
+                return image
+            } else {
+                print("⚠️ Failed to create UIImage from psych.jpg at path: \(path)")
+            }
+        } else {
+            print("⚠️ psych.jpg not found in bundle using path(forResource:ofType:)")
+        }
+        
+        // Try PNG version
+        if let path = Bundle.main.path(forResource: "psych", ofType: "png") {
+            print("🎨 Found psych.png at path: \(path)")
+            if let image = UIImage(contentsOfFile: path) {
+                print("🎨 Successfully loaded psych.png from path, size: \(image.size)")
+                return image
+            }
+        }
+        
+        // Try finding in main bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let psychJPGPath = (resourcePath as NSString).appendingPathComponent("psych.jpg")
+            if FileManager.default.fileExists(atPath: psychJPGPath) {
+                if let image = UIImage(contentsOfFile: psychJPGPath) {
+                    print("🎨 Found and loaded psych.jpg from resourcePath, size: \(image.size)")
+                    return image
+                }
+            }
+        }
+        
+        print("❌ Failed to load psych image from any source")
+        print("   Make sure psych.jpg is added to Xcode project and included in app bundle")
+        return nil
+    }
+}
+
+/// Reusable image background - UIKit-based for reliable rendering
+private struct ImageBackground: UIViewRepresentable {
+    let imageName: String
+    let imageType: String // "jpg" or "png"
+    
+    func makeUIView(context: Context) -> BackgroundImageView {
+        let view = BackgroundImageView(imageName: imageName, imageType: imageType)
+        return view
+    }
+    
+    func updateUIView(_ uiView: BackgroundImageView, context: Context) {
+        // No updates needed
+    }
+}
+
+private class BackgroundImageView: UIView {
+    let imageName: String
+    let imageType: String
+    
+    init(imageName: String, imageType: String) {
+        self.imageName = imageName
+        self.imageType = imageType
+        super.init(frame: .zero)
+        setup()
+    }
+    
+    required init?(coder: NSCoder) {
+        self.imageName = ""
+        self.imageType = "jpg"
+        super.init(coder: coder)
+        setup()
+    }
+    
+    private func setup() {
+        print("🎨 BackgroundImageView setup() called for: \(imageName).\(imageType)")
+        clipsToBounds = false // Allow overflow beyond bounds
+        
+        // Try to load and display image
+        if let bgImage = loadBackgroundImage() {
+            print("🎨 Setting up background image view with image, size: \(bgImage.size)")
+            backgroundColor = UIColor.clear
+            let imageView = UIImageView(image: bgImage)
+            imageView.contentMode = .scaleAspectFill
+            imageView.clipsToBounds = false // Allow overflow
+            imageView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(imageView)
+            
+            // Extend the image beyond the view bounds to fill curved edges
+            NSLayoutConstraint.activate([
+                imageView.topAnchor.constraint(equalTo: topAnchor, constant: -50),
+                imageView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 50),
+                imageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -50),
+                imageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 50)
+            ])
+            print("🎨 Background image view setup complete for: \(imageName)")
+        } else {
+            // Fallback to black background
+            print("⚠️ Background image not loaded - showing black fallback for: \(imageName).\(imageType)")
+            backgroundColor = UIColor.black
+        }
+    }
+    
+    private func loadBackgroundImage() -> UIImage? {
+        // Try UIImage(named:) first - most reliable if file is in bundle
+        if let image = UIImage(named: imageName) {
+            print("🎨 Found \(imageName) image using UIImage(named:), size: \(image.size)")
+            return image
+        }
+        
+        // Try with extension in name
+        let nameWithExt = "\(imageName).\(imageType)"
+        if let image = UIImage(named: nameWithExt) {
+            print("🎨 Found \(nameWithExt) image using UIImage(named:), size: \(image.size)")
+            return image
+        }
+        
+        // Try loading from Resources folder path
+        if let path = Bundle.main.path(forResource: imageName, ofType: imageType) {
+            print("🎨 Found \(nameWithExt) at path: \(path)")
+            if let image = UIImage(contentsOfFile: path) {
+                print("🎨 Successfully loaded \(nameWithExt) from path, size: \(image.size)")
+                return image
+            } else {
+                print("⚠️ Failed to create UIImage from \(nameWithExt) at path: \(path)")
+            }
+        } else {
+            print("⚠️ \(nameWithExt) not found in bundle using path(forResource:ofType:)")
+        }
+        
+        // Try finding in main bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let imagePath = (resourcePath as NSString).appendingPathComponent(nameWithExt)
+            if FileManager.default.fileExists(atPath: imagePath) {
+                if let image = UIImage(contentsOfFile: imagePath) {
+                    print("🎨 Found and loaded \(nameWithExt) from resourcePath, size: \(image.size)")
+                    return image
+                }
+            }
+        }
+        
+        print("❌ Failed to load background image from any source: \(nameWithExt)")
+        return nil
+    }
+}
+
+/// Video background - UIKit-based with AVPlayerLayer for efficient playback
+private struct VideoBackground: UIViewRepresentable {
+    let videoName: String
+    
+    func makeUIView(context: Context) -> VideoBackgroundView {
+        let view = VideoBackgroundView(videoName: videoName)
+        return view
+    }
+    
+    func updateUIView(_ uiView: VideoBackgroundView, context: Context) {
+        // Update if video name changes
+        if uiView.videoName != videoName {
+            uiView.loadVideo(videoName: videoName)
+        }
+    }
+}
+
+private class VideoBackgroundView: UIView {
+    var videoName: String
+    private var player: AVPlayer?
+    private var playerLayer: AVPlayerLayer?
+    private var looper: AVPlayerLooper?
+    
+    init(videoName: String) {
+        self.videoName = videoName
+        super.init(frame: .zero)
+        setup()
+        loadVideo(videoName: videoName)
+    }
+    
+    required init?(coder: NSCoder) {
+        self.videoName = ""
+        super.init(coder: coder)
+        setup()
+    }
+    
+    private func setup() {
+        backgroundColor = UIColor.black // Fallback background
+        clipsToBounds = false // Allow overflow beyond bounds
+    }
+    
+    func loadVideo(videoName: String) {
+        self.videoName = videoName
+        
+        // Remove existing player layer
+        playerLayer?.removeFromSuperlayer()
+        playerLayer = nil
+        looper?.disableLooping()
+        looper = nil
+        player?.pause()
+        player = nil
+        
+        guard let videoURL = loadVideoURL(videoName: videoName) else {
+            print("⚠️ Video background not loaded - showing black fallback for: \(videoName)")
+            backgroundColor = UIColor.black // Show black fallback
+            return
+        }
+        
+        // Create player item
+        let playerItem = AVPlayerItem(url: videoURL)
+        
+        // Create queue player for looping
+        let queuePlayer = AVQueuePlayer(playerItem: playerItem)
+        
+        // Create looper for seamless looping
+        looper = AVPlayerLooper(player: queuePlayer, templateItem: playerItem)
+        
+        player = queuePlayer
+        
+        // Create player layer
+        let layer = AVPlayerLayer(player: queuePlayer)
+        layer.videoGravity = .resizeAspectFill // Fill entire view, cropping if needed
+        layer.player?.play()
+        
+        self.playerLayer = layer
+        self.layer.addSublayer(layer)
+        
+        // Frame will be set in layoutSubviews() to handle bounds correctly
+        setNeedsLayout()
+        
+        print("🎬 Video background loaded: \(videoName), URL: \(videoURL)")
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        
+        // Update player layer frame to fill view + extend beyond bounds (similar to image backgrounds)
+        if let playerLayer = playerLayer {
+            playerLayer.frame = CGRect(x: -50, y: -50, width: bounds.width + 100, height: bounds.height + 100)
+        }
+    }
+    
+    private func loadVideoURL(videoName: String) -> URL? {
+        // Try loading from Resources folder
+        if let path = Bundle.main.path(forResource: videoName, ofType: "mp4") {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path) {
+                print("🎬 Found video at path: \(path)")
+                return url
+            }
+        }
+        
+        // Try loading from bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let videoPath = (resourcePath as NSString).appendingPathComponent("\(videoName).mp4")
+            if FileManager.default.fileExists(atPath: videoPath) {
+                let url = URL(fileURLWithPath: videoPath)
+                print("🎬 Found video at resourcePath: \(videoPath)")
+                return url
+            }
+        }
+        
+        // Try loading from main bundle
+        if let url = Bundle.main.url(forResource: videoName, withExtension: "mp4") {
+            print("🎬 Found video using Bundle.main.url: \(url)")
+            return url
+        }
+        
+        print("❌ Failed to find video file: \(videoName).mp4")
+        return nil
+    }
+    
+    deinit {
+        // Clean up player resources
+        player?.pause()
+        looper?.disableLooping()
+        playerLayer?.removeFromSuperlayer()
+        player = nil
+        looper = nil
+        playerLayer = nil
     }
 }
 

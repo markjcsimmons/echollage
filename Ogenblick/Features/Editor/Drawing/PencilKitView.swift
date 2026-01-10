@@ -9,6 +9,7 @@ struct PencilKitView: UIViewRepresentable {
     var strokeWidth: CGFloat = 8
     var expectedSize: CGSize? = nil // Optional expected size for bounds matching
     var onDrawingChanged: ((Data) -> Void)?
+    var onTapOnly: (() -> Void)? = nil // Callback when user taps (not draws) to deselect paint tool
 
     func makeUIView(context: Context) -> BoundedPencilKitCanvasView {
         let view = BoundedPencilKitCanvasView(expectedSize: expectedSize)
@@ -22,6 +23,7 @@ struct PencilKitView: UIViewRepresentable {
             view.drawing = drawing
         }
         view.delegate = context.coordinator
+        view.onTapOnly = onTapOnly // Pass callback to view
         
         // Set tool with pressure sensitivity
         updateTool(for: view)
@@ -48,8 +50,9 @@ struct PencilKitView: UIViewRepresentable {
         // Update tool based on current settings
         updateTool(for: uiView)
         
-        // Update callback
+        // Update callbacks
         context.coordinator.onDrawingChanged = onDrawingChanged
+        uiView.onTapOnly = onTapOnly
     }
     
     private func updateTool(for view: PKCanvasView) {
@@ -123,6 +126,9 @@ class BoundedPencilKitCanvasView: PKCanvasView {
         }
     }
     
+    var onTapOnly: (() -> Void)? = nil // Callback when user taps (not draws)
+    private var touchStartLocation: CGPoint? = nil
+    private var hasMoved = false
     private var hasSetInitialBounds = false
     
     init(expectedSize: CGSize?) {
@@ -176,6 +182,13 @@ class BoundedPencilKitCanvasView: PKCanvasView {
                 print("🔄 BoundedPencilKitCanvasView touchesBegan: Corrected bounds to \(expected) before touch (was \(bounds.size))")
             }
         }
+        
+        // Track touch start location to detect taps vs draws
+        if let touch = touches.first {
+            touchStartLocation = touch.location(in: self)
+            hasMoved = false
+        }
+        
         super.touchesBegan(touches, with: event)
     }
     
@@ -186,7 +199,43 @@ class BoundedPencilKitCanvasView: PKCanvasView {
                 bounds = CGRect(origin: .zero, size: expected)
             }
         }
+        
+        // Track if touch has moved (means it's a draw, not a tap)
+        if touchStartLocation != nil {
+            hasMoved = true
+        }
+        
         super.touchesMoved(touches, with: event)
+    }
+    
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesEnded(touches, with: event)
+        
+        // If touch ended without moving (was a tap, not a draw), call callback
+        if let startLocation = touchStartLocation, !hasMoved, let touch = touches.first {
+            let endLocation = touch.location(in: self)
+            let distance = hypot(endLocation.x - startLocation.x, endLocation.y - startLocation.y)
+            
+            // If touch moved less than 5 points, consider it a tap
+            if distance < 5.0 {
+                print("🎨 Detected tap on canvas (not draw) - calling onTapOnly callback")
+                DispatchQueue.main.async {
+                    self.onTapOnly?()
+                }
+            }
+        }
+        
+        // Reset tracking
+        touchStartLocation = nil
+        hasMoved = false
+    }
+    
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        super.touchesCancelled(touches, with: event)
+        
+        // Reset tracking on cancel
+        touchStartLocation = nil
+        hasMoved = false
     }
 }
 

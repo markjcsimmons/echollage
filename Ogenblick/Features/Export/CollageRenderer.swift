@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import UIKit
+import AVFoundation
+import AVKit
 import PencilKit
 
 /// Renders a collage project to a single flattened UIImage
@@ -66,6 +68,110 @@ enum CollageRenderer {
                 ctx.setFillColor(UIColor.black.cgColor)
                 ctx.fill(CGRect(origin: .zero, size: size))
                 print("🎨 Drew black background")
+            case .psych:
+                // Psych background - render image similar to cork
+                if let psychImage = loadPsychImage() {
+                    // Use scaleAspectFill to match editor
+                    let psychAspect = psychImage.size.width / psychImage.size.height
+                    let screenAspect = size.width / size.height
+                    
+                    var drawSize = size
+                    if psychAspect > screenAspect {
+                        // Psych image is wider, scale to height and extend width
+                        drawSize.height = size.height + 100 // Extra 50pt on each edge
+                        drawSize.width = drawSize.height * psychAspect
+                    } else {
+                        // Psych image is taller, scale to width and extend height
+                        drawSize.width = size.width + 100 // Extra 50pt on each edge
+                        drawSize.height = drawSize.width / psychAspect
+                    }
+                    
+                    // Center the psych image with offset
+                    let drawRect = CGRect(
+                        x: (size.width - drawSize.width) / 2,
+                        y: (size.height - drawSize.height) / 2,
+                        width: drawSize.width,
+                        height: drawSize.height
+                    )
+                    
+                    psychImage.draw(in: drawRect)
+                    print("🎨 Drew psych background at \(drawRect)")
+                } else {
+                    // Fallback to black background
+                    ctx.setFillColor(UIColor.black.cgColor)
+                    ctx.fill(CGRect(origin: .zero, size: size))
+                    print("🎨 Drew fallback black background for psych")
+                }
+            case .orange, .pattern, .stripes, .colored, .psychedelic, .floralPattern, .texture, .watercolor:
+                // Image backgrounds - render similar to psych
+                let (imageName, imageType) = imageNameAndType(for: project.backgroundType)
+                if let bgImage = loadBackgroundImage(imageName: imageName, imageType: imageType) {
+                    // Use scaleAspectFill to match editor
+                    let bgAspect = bgImage.size.width / bgImage.size.height
+                    let screenAspect = size.width / size.height
+                    
+                    var drawSize = size
+                    if bgAspect > screenAspect {
+                        // Background is wider, scale to height and extend width
+                        drawSize.height = size.height + 100 // Extra 50pt on each edge
+                        drawSize.width = drawSize.height * bgAspect
+                    } else {
+                        // Background is taller, scale to width and extend height
+                        drawSize.width = size.width + 100 // Extra 50pt on each edge
+                        drawSize.height = drawSize.width / bgAspect
+                    }
+                    
+                    // Center the background image with offset
+                    let drawRect = CGRect(
+                        x: (size.width - drawSize.width) / 2,
+                        y: (size.height - drawSize.height) / 2,
+                        width: drawSize.width,
+                        height: drawSize.height
+                    )
+                    
+                    bgImage.draw(in: drawRect)
+                    print("🎨 Drew background (\(imageName).\(imageType)) at \(drawRect)")
+                } else {
+                    // Fallback to black background
+                    ctx.setFillColor(UIColor.black.cgColor)
+                    ctx.fill(CGRect(origin: .zero, size: size))
+                    print("🎨 Drew fallback black background for: \(imageName).\(imageType)")
+                }
+            case .fireworks, .mountains, .waves, .tiny:
+                // Video backgrounds - extract first frame for static export
+                let videoName = videoName(for: project.backgroundType)
+                if let videoFrame = extractFirstFrame(videoName: videoName) {
+                    // Use scaleAspectFill to match editor
+                    let videoAspect = videoFrame.size.width / videoFrame.size.height
+                    let screenAspect = size.width / size.height
+                    
+                    var drawSize = size
+                    if videoAspect > screenAspect {
+                        // Video is wider, scale to height and extend width
+                        drawSize.height = size.height + 100 // Extra 50pt on each edge
+                        drawSize.width = drawSize.height * videoAspect
+                    } else {
+                        // Video is taller, scale to width and extend height
+                        drawSize.width = size.width + 100 // Extra 50pt on each edge
+                        drawSize.height = drawSize.width / videoAspect
+                    }
+                    
+                    // Center the video frame with offset
+                    let drawRect = CGRect(
+                        x: (size.width - drawSize.width) / 2,
+                        y: (size.height - drawSize.height) / 2,
+                        width: drawSize.width,
+                        height: drawSize.height
+                    )
+                    
+                    videoFrame.draw(in: drawRect)
+                    print("🎬 Drew video background (\(videoName)) first frame at \(drawRect)")
+                } else {
+                    // Fallback to black background
+                    ctx.setFillColor(UIColor.black.cgColor)
+                    ctx.fill(CGRect(origin: .zero, size: size))
+                    print("🎬 Drew fallback black background for video: \(videoName)")
+                }
             }
             
             // Image layers - render exactly as positioned in editor
@@ -191,6 +297,165 @@ enum CollageRenderer {
         let rotatedImage = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
         return rotatedImage
+    }
+    
+    // Helper function to load psych image (matching editor)
+    private static func loadPsychImage() -> UIImage? {
+        // Try multiple possible names and methods (matching editor)
+        let possibleNames = ["psych", "psych.jpg", "psych.png"]
+        
+        // First try UIImage(named:) - this is most reliable if file is in bundle
+        for name in possibleNames {
+            if let image = UIImage(named: name) {
+                print("🎨 Found psych image using UIImage(named: \"\(name)\"), size: \(image.size)")
+                return image
+            }
+        }
+        
+        // Then try loading from Resources folder path
+        if let path = Bundle.main.path(forResource: "psych", ofType: "jpg"),
+           let image = UIImage(contentsOfFile: path) {
+            print("🎨 Found psych.jpg at path: \(path), size: \(image.size)")
+            return image
+        }
+        
+        // Try PNG version
+        if let path = Bundle.main.path(forResource: "psych", ofType: "png"),
+           let image = UIImage(contentsOfFile: path) {
+            print("🎨 Found psych.png at path: \(path), size: \(image.size)")
+            return image
+        }
+        
+        // Try finding in main bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let psychJPGPath = (resourcePath as NSString).appendingPathComponent("psych.jpg")
+            if FileManager.default.fileExists(atPath: psychJPGPath),
+               let image = UIImage(contentsOfFile: psychJPGPath) {
+                print("🎨 Found and loaded psych.jpg from resourcePath, size: \(image.size)")
+                return image
+            }
+        }
+        
+        print("❌ Failed to load psych image from any source")
+        return nil
+    }
+    
+    // Helper function to get image name and type for background type
+    private static func imageNameAndType(for backgroundType: BackgroundType) -> (name: String, type: String) {
+        switch backgroundType {
+        case .orange: return ("orange", "png")
+        case .pattern: return ("pattern", "jpg")
+        case .stripes: return ("stripes", "jpg")
+        case .colored: return ("colored-7292420_1920", "jpg")
+        case .psychedelic: return ("psychedelic-9957735_1920", "jpg")
+        case .floralPattern: return ("floral-pattern-7411179_1280", "png")
+        case .texture: return ("texture-794826_1280", "png")
+        case .watercolor: return ("watercolor-7129105_1920", "png")
+        default: return ("", "jpg")
+        }
+    }
+    
+    // Helper function to load background image
+    private static func loadBackgroundImage(imageName: String, imageType: String) -> UIImage? {
+        let nameWithExt = "\(imageName).\(imageType)"
+        
+        // Try UIImage(named:) first - most reliable if file is in bundle
+        if let image = UIImage(named: imageName) {
+            print("🎨 Found \(imageName) image using UIImage(named:), size: \(image.size)")
+            return image
+        }
+        
+        // Try with extension in name
+        if let image = UIImage(named: nameWithExt) {
+            print("🎨 Found \(nameWithExt) image using UIImage(named:), size: \(image.size)")
+            return image
+        }
+        
+        // Try loading from Resources folder path
+        if let path = Bundle.main.path(forResource: imageName, ofType: imageType),
+           let image = UIImage(contentsOfFile: path) {
+            print("🎨 Found \(nameWithExt) at path: \(path), size: \(image.size)")
+            return image
+        }
+        
+        // Try finding in main bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let imagePath = (resourcePath as NSString).appendingPathComponent(nameWithExt)
+            if FileManager.default.fileExists(atPath: imagePath),
+               let image = UIImage(contentsOfFile: imagePath) {
+                print("🎨 Found and loaded \(nameWithExt) from resourcePath, size: \(image.size)")
+                return image
+            }
+        }
+        
+        print("❌ Failed to load background image from any source: \(nameWithExt)")
+        return nil
+    }
+    
+    // Helper function to get video filename for background type
+    private static func videoName(for backgroundType: BackgroundType) -> String {
+        switch backgroundType {
+        case .fireworks: return "fireworks"
+        case .mountains: return "mountains"
+        case .waves: return "waves"
+        case .tiny: return "214784_tiny"
+        default: return ""
+        }
+    }
+    
+    // Extract first frame from video as UIImage for static export
+    private static func extractFirstFrame(videoName: String) -> UIImage? {
+        guard let videoURL = loadVideoURL(videoName: videoName) else {
+            print("❌ Failed to find video file: \(videoName).mp4")
+            return nil
+        }
+        
+        let asset = AVAsset(url: videoURL)
+        let imageGenerator = AVAssetImageGenerator(asset: asset)
+        imageGenerator.appliesPreferredTrackTransform = true
+        imageGenerator.requestedTimeToleranceAfter = .zero
+        imageGenerator.requestedTimeToleranceBefore = .zero
+        
+        do {
+            let cgImage = try imageGenerator.copyCGImage(at: .zero, actualTime: nil)
+            let uiImage = UIImage(cgImage: cgImage)
+            print("🎬 Extracted first frame from \(videoName).mp4, size: \(uiImage.size)")
+            return uiImage
+        } catch {
+            print("❌ Failed to extract first frame from \(videoName).mp4: \(error)")
+            return nil
+        }
+    }
+    
+    // Helper function to load video URL from bundle
+    private static func loadVideoURL(videoName: String) -> URL? {
+        // Try loading from Resources folder
+        if let path = Bundle.main.path(forResource: videoName, ofType: "mp4") {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path) {
+                print("🎬 Found video at path: \(path)")
+                return url
+            }
+        }
+        
+        // Try loading from bundle resources
+        if let resourcePath = Bundle.main.resourcePath {
+            let videoPath = (resourcePath as NSString).appendingPathComponent("\(videoName).mp4")
+            if FileManager.default.fileExists(atPath: videoPath) {
+                let url = URL(fileURLWithPath: videoPath)
+                print("🎬 Found video at resourcePath: \(videoPath)")
+                return url
+            }
+        }
+        
+        // Try loading from main bundle
+        if let url = Bundle.main.url(forResource: videoName, withExtension: "mp4") {
+            print("🎬 Found video using Bundle.main.url: \(url)")
+            return url
+        }
+        
+        print("❌ Failed to find video file: \(videoName).mp4")
+        return nil
     }
 }
 

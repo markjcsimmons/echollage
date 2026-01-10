@@ -6,6 +6,19 @@ enum BackgroundType: String, Codable {
     case white
     case skyBlue
     case black
+    case psych
+    case orange
+    case pattern
+    case stripes
+    case colored
+    case psychedelic
+    case floralPattern
+    case texture
+    case watercolor
+    case fireworks
+    case mountains
+    case waves
+    case tiny
 }
 
 struct MusicMetadata: Codable, Equatable {
