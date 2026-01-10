@@ -7,12 +7,17 @@ struct PencilKitView: UIViewRepresentable {
     var isEraseMode: Bool = false
     var strokeColor: Color = .white
     var strokeWidth: CGFloat = 8
+    var expectedSize: CGSize? = nil // Optional expected size for bounds matching
     var onDrawingChanged: ((Data) -> Void)?
 
-    func makeUIView(context: Context) -> PKCanvasView {
-        let view = PKCanvasView()
+    func makeUIView(context: Context) -> BoundedPencilKitCanvasView {
+        let view = BoundedPencilKitCanvasView(expectedSize: expectedSize)
         view.drawingPolicy = isDrawingEnabled ? .anyInput : .pencilOnly
         view.backgroundColor = .clear
+        view.isOpaque = false
+        // Ensure coordinate system matches exactly - disable content scale factor compensation
+        // This ensures drawing coordinates match display coordinates exactly
+        view.contentScaleFactor = UIScreen.main.scale
         if let drawing = try? PKDrawing(data: drawingData) {
             view.drawing = drawing
         }
@@ -24,8 +29,11 @@ struct PencilKitView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: PKCanvasView, context: Context) {
+    func updateUIView(_ uiView: BoundedPencilKitCanvasView, context: Context) {
         uiView.drawingPolicy = isDrawingEnabled ? .anyInput : .pencilOnly
+        
+        // Update expected size for bounds matching
+        uiView.expectedSize = expectedSize
         
         // Update drawing if data changed externally (e.g., undo)
         let currentDrawing = uiView.drawing.dataRepresentation()
@@ -100,6 +108,85 @@ struct PencilKitView: UIViewRepresentable {
                 isDrawingStroke = false
             }
         }
+    }
+}
+
+/// PKCanvasView subclass that ensures bounds match expected size for coordinate consistency
+/// CRITICAL: PencilKit records coordinates relative to bounds, so bounds must match exactly
+/// between when drawing is created and when it's displayed
+class BoundedPencilKitCanvasView: PKCanvasView {
+    var expectedSize: CGSize? {
+        didSet {
+            if oldValue != expectedSize {
+                setNeedsLayout()
+            }
+        }
+    }
+    
+    private var hasSetInitialBounds = false
+    
+    init(expectedSize: CGSize?) {
+        self.expectedSize = expectedSize
+        let size = expectedSize ?? CGSize(width: 100, height: 100) // Default size
+        super.init(frame: CGRect(origin: .zero, size: size))
+        // Set bounds immediately in init to ensure they match from the start
+        if let expected = expectedSize, expected.width > 0 && expected.height > 0 {
+            bounds = CGRect(origin: .zero, size: expected)
+            hasSetInitialBounds = true
+            print("🔄 BoundedPencilKitCanvasView init: Set bounds to \(expected)")
+        }
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    override func layoutSubviews() {
+        // CRITICAL: Set bounds BEFORE super.layoutSubviews() so PencilKit uses correct coordinate space
+        // PencilKit records coordinates relative to bounds, so bounds must match expected size exactly
+        if let expected = expectedSize, expected.width > 0 && expected.height > 0 {
+            if bounds.size != expected {
+                bounds = CGRect(origin: .zero, size: expected)
+                if !hasSetInitialBounds {
+                    print("🔄 BoundedPencilKitCanvasView: Setting bounds to \(expected) before layout (frame: \(frame.size))")
+                    hasSetInitialBounds = true
+                } else {
+                    print("🔄 BoundedPencilKitCanvasView: Correcting bounds to \(expected) before layout (was \(bounds.size), frame: \(frame.size))")
+                }
+            }
+        }
+        
+        super.layoutSubviews()
+        
+        // Ensure bounds are still correct after super.layoutSubviews() (it might change them)
+        if let expected = expectedSize, expected.width > 0 && expected.height > 0 {
+            if bounds.size != expected {
+                bounds = CGRect(origin: .zero, size: expected)
+                print("🔄 BoundedPencilKitCanvasView: Corrected bounds after layout to \(expected) (was \(bounds.size), frame: \(frame.size))")
+            }
+        }
+    }
+    
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // CRITICAL: Ensure bounds are correct before handling touches
+        // Touch coordinates are converted to view's coordinate space, which depends on bounds
+        if let expected = expectedSize, expected.width > 0 && expected.height > 0 {
+            if bounds.size != expected {
+                bounds = CGRect(origin: .zero, size: expected)
+                print("🔄 BoundedPencilKitCanvasView touchesBegan: Corrected bounds to \(expected) before touch (was \(bounds.size))")
+            }
+        }
+        super.touchesBegan(touches, with: event)
+    }
+    
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // Ensure bounds remain correct during touch move
+        if let expected = expectedSize, expected.width > 0 && expected.height > 0 {
+            if bounds.size != expected {
+                bounds = CGRect(origin: .zero, size: expected)
+            }
+        }
+        super.touchesMoved(touches, with: event)
     }
 }
 

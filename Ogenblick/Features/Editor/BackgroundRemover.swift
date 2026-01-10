@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Vision
+import CoreVideo
 
 /// Utility for removing backgrounds from images containing people using Vision framework
 class BackgroundRemover {
@@ -9,7 +10,9 @@ class BackgroundRemover {
     /// - Parameter image: The input image
     /// - Returns: Image with background removed (transparent), or nil if no person detected or processing failed
     static func removeBackground(from image: UIImage) async -> UIImage? {
-        guard let cgImage = image.cgImage else {
+        // Normalize image orientation first to prevent rotation issues
+        let normalizedImage = normalizeImageOrientation(image)
+        guard let cgImage = normalizedImage.cgImage else {
             print("❌ BackgroundRemover: Failed to get CGImage")
             return nil
         }
@@ -29,8 +32,8 @@ class BackgroundRemover {
                     return
                 }
                 
-                // Apply mask to original image
-                guard let resultImage = self.applyMask(observation, to: image) else {
+                // Apply mask to normalized image
+                guard let resultImage = self.applyMask(observation, to: normalizedImage) else {
                     print("❌ BackgroundRemover: Failed to apply mask")
                     continuation.resume(returning: nil)
                     return
@@ -89,51 +92,165 @@ class BackgroundRemover {
     // MARK: - Private Helpers
     
     private static func applyMask(_ observation: VNPixelBufferObservation, to image: UIImage) -> UIImage? {
+        // Image is already normalized at this point
         guard let cgImage = image.cgImage else { return nil }
         
         let pixelBuffer = observation.pixelBuffer
-        let imageSize = image.size
+        // Use actual pixel dimensions from CGImage, not UIImage.size which may differ
+        let pixelWidth = CGFloat(cgImage.width)
+        let pixelHeight = CGFloat(cgImage.height)
+        let imageSize = CGSize(width: pixelWidth, height: pixelHeight)
         
-        // Create Core Image context
-        let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+        print("🔄 applyMask: image size: \(image.size), pixel size: \(imageSize), orientation: \(image.imageOrientation.rawValue)")
+        print("🔄 applyMask: normalized image orientation: \(image.imageOrientation.rawValue), normalized CGImage size: \(cgImage.width)x\(cgImage.height)")
         
-        // Convert pixel buffer to CIImage
-        let maskCIImage = CIImage(cvPixelBuffer: pixelBuffer)
+        // Get mask dimensions from pixel buffer
+        let maskWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let maskHeight = CVPixelBufferGetHeight(pixelBuffer)
+        let maskSize = CGSize(width: maskWidth, height: maskHeight)
         
-        // Scale mask to match image size
-        let maskExtent = maskCIImage.extent
-        let scaleX = imageSize.width / maskExtent.width
-        let scaleY = imageSize.height / maskExtent.height
-        let scaledMask = maskCIImage.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+        print("🔄 applyMask: mask extent: (0, 0, \(maskWidth), \(maskHeight))")
+        let scaleX = imageSize.width / maskSize.width
+        let scaleY = imageSize.height / maskSize.height
+        print("🔄 applyMask: scale factors: x=\(scaleX), y=\(scaleY)")
         
-        // Convert mask to CGImage
-        guard let maskCGImage = ciContext.createCGImage(scaledMask, from: CGRect(origin: .zero, size: imageSize)) else {
-            print("❌ BackgroundRemover: Failed to create mask CGImage")
+        // Create mask CGImage directly from pixel buffer to avoid CIImage coordinate issues
+        // Lock the pixel buffer to access its data
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        
+        let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        
+        // Create a bitmap context from the pixel buffer data
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.linearGray) else {
+            print("❌ BackgroundRemover: Failed to create color space")
             return nil
         }
         
-        // Create output image with transparent background
+        // Create the mask CGImage directly from pixel buffer data
+        // Vision outputs pixel buffers with top-left origin (UIKit coordinate system)
+        // When creating a CGImage from pixel buffer data, we need to ensure correct orientation
+        // Since we'll use it with UIGraphicsImageRenderer (which uses top-left origin), 
+        // we need to flip vertically because Core Graphics uses bottom-left origin
+        
+        // Create context for final mask (at target size)
+        guard let maskContext = CGContext(
+            data: nil,
+            width: Int(imageSize.width),
+            height: Int(imageSize.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            print("❌ BackgroundRemover: Failed to create mask context")
+            return nil
+        }
+        
+        // Create temporary CGImage from pixel buffer (this reads pixels in buffer order = top-left)
+        guard let tempContext = CGContext(
+            data: baseAddress,
+            width: maskWidth,
+            height: maskHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ), let tempMaskCGImage = tempContext.makeImage() else {
+            print("❌ BackgroundRemover: Failed to create temporary mask CGImage")
+            return nil
+        }
+        
+        // Draw the mask with flipped context to match UIKit's top-left origin
+        // Core Graphics uses bottom-left origin, so we flip vertically
+        maskContext.saveGState()
+        maskContext.translateBy(x: 0, y: imageSize.height)
+        maskContext.scaleBy(x: 1.0, y: -1.0)
+        
+        // Draw and scale with high quality interpolation
+        // Use exact rect at origin to ensure no offset
+        maskContext.interpolationQuality = .high
+        maskContext.draw(tempMaskCGImage, in: CGRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height))
+        
+        maskContext.restoreGState()
+        
+        guard let maskCGImage = maskContext.makeImage() else {
+            print("❌ BackgroundRemover: Failed to create final mask CGImage")
+            return nil
+        }
+        
+        // Create output image with transparent background using pixel dimensions
         let format = UIGraphicsImageRendererFormat()
         format.scale = image.scale
         format.opaque = false
         
         let renderer = UIGraphicsImageRenderer(size: imageSize, format: format)
-        return renderer.image { rendererContext in
+        let resultImage = renderer.image { rendererContext in
             let cgContext = rendererContext.cgContext
             let rect = CGRect(origin: .zero, size: imageSize)
             
             // Save graphics state
             cgContext.saveGState()
             
-            // Clip to mask (person area)
-            cgContext.clip(to: rect, mask: maskCGImage)
+            // Clip to mask (person area) - mask is already correctly oriented for UIKit (top-left origin)
+            // Use exact rect at origin (0, 0) to ensure no offset
+            let clipRect = CGRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height)
+            cgContext.clip(to: clipRect, mask: maskCGImage)
             
-            // Draw the original image (only in the clipped area)
-            cgContext.draw(cgImage, in: rect)
+            // Since the mask is correctly positioned with a vertical flip during creation,
+            // and the image appears rotated 180 degrees, we need to flip the image context
+            // to match the mask. The mask was flipped vertically, so we flip the image
+            // context vertically as well to align them.
+            // UIGraphicsImageRenderer's context is already flipped for UIKit, but when drawing
+            // a CGImage directly with cgContext.draw(), it might interpret it differently.
+            cgContext.saveGState()
+            cgContext.translateBy(x: 0, y: imageSize.height)
+            cgContext.scaleBy(x: 1.0, y: -1.0)
+            
+            // Draw the normalized image's CGImage with the flipped context to match mask
+            cgContext.draw(cgImage, in: CGRect(x: 0, y: 0, width: imageSize.width, height: imageSize.height))
+            
+            cgContext.restoreGState()
             
             // Restore graphics state
             cgContext.restoreGState()
         }
+        
+        print("🔄 applyMask: result image size: \(resultImage.size), orientation: \(resultImage.imageOrientation.rawValue)")
+        return resultImage
+    }
+    
+    /// Normalize image orientation to .up by creating a new image
+    /// This prevents rotation issues when saving PNG files
+    private static func normalizeImageOrientation(_ image: UIImage) -> UIImage {
+        // If orientation is already up, return as-is
+        if image.imageOrientation == .up {
+            return image
+        }
+        
+        // Get the actual pixel dimensions from CGImage
+        guard let cgImage = image.cgImage else { return image }
+        let pixelWidth = CGFloat(cgImage.width)
+        let pixelHeight = CGFloat(cgImage.height)
+        let pixelSize = CGSize(width: pixelWidth, height: pixelHeight)
+        
+        // Create a new image by drawing the original image
+        // UIImage.draw() automatically applies the orientation transform
+        // Use actual pixel dimensions for consistency with mask creation
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+        
+        // Use pixel dimensions for the renderer to ensure exact size matching
+        let renderer = UIGraphicsImageRenderer(size: pixelSize, format: format)
+        let normalized = renderer.image { _ in
+            // UIImage.draw() automatically applies the orientation transform
+            // Draw at pixel size to ensure exact dimensions
+            image.draw(in: CGRect(origin: .zero, size: pixelSize))
+        }
+        
+        return normalized
     }
 }
-

@@ -487,10 +487,10 @@ struct CollageEditorView: View {
             }
             hasCompletedCapture = true
         }
-        .onChange(of: drawingData) { newValue in
-            project.drawingDataBase64 = newValue.base64EncodedString()
-            store.update(project)
-        }
+        // REMOVED: .onChange(of: drawingData) that was always updating global canvas
+        // This was causing image-specific drawings to also appear in global canvas (top-left)
+        // Drawing should only be saved when Done button is clicked or drawing toolbar is closed
+        // DO NOT auto-save drawingData changes - this causes conflicts between image and global canvas drawing
         .fullScreenCover(isPresented: $showCapture) {
             CaptureAudioView(project: $project) {
                 hasCompletedCapture = true
@@ -586,9 +586,10 @@ struct CollageEditorView: View {
                             .frame(width: baseSize.width, height: baseSize.height)
                             .id("erasable-\(layer.id)") // Stable identity
                             
-                            // Drawing overlay (bound to this image)
+                            // Drawing overlay (bound to this image) - show saved drawing
                             if let drawingBase64 = layer.drawingDataBase64,
-                               let drawingDataForImage = Data(base64Encoded: drawingBase64) {
+                               let drawingDataForImage = Data(base64Encoded: drawingBase64),
+                               currentDrawingImageId != layer.id { // Don't show saved drawing while actively drawing on this image
                                 ImageBoundDrawingView(
                                     drawingData: drawingDataForImage,
                                     imageSize: baseSize,
@@ -596,18 +597,50 @@ struct CollageEditorView: View {
                                 )
                                 .frame(width: baseSize.width, height: baseSize.height)
                                 .allowsHitTesting(false)
+                                .id("drawing-\(layer.id)-\(drawingBase64.prefix(20))-\(refreshTrigger)") // Force recreation when drawing changes or refresh triggered
                             }
                             
-                            // Selection border
-                            if selectedImageId == layer.id {
+                            // Active PencilKit drawing canvas - positioned exactly on top of image
+                            // CRITICAL: Supports both drawing AND erasing drawings (PencilKit erase mode)
+                            // Note: Image erasing (erasing parts of the image itself) uses PressureEraseView separately
+                            // Both image drawing erase and global canvas drawing erase use the same drawingData binding
+                            // so they benefit from the same fixes (no auto-save, Done button saves to correct place)
+                            if isDrawing && currentDrawingImageId == layer.id {
+                                PencilKitView(
+                                    drawingData: $drawingData,
+                                    isDrawingEnabled: true,
+                                    isEraseMode: false, // Currently always false (image erase uses PressureEraseView)
+                                    strokeColor: strokeColor,
+                                    strokeWidth: strokeWidth,
+                                    expectedSize: baseSize, // CRITICAL: Pass expected size for bounds matching
+                                    onDrawingChanged: { newData in
+                                        print("🎨 Image drawing changed, data size: \(newData.count) bytes")
+                                        if !drawingHistory.isEmpty && drawingHistory.last == newData {
+                                            print("🎨 Skipping duplicate")
+                                            return
+                                        }
+                                        drawingHistory.append(newData)
+                                        print("🎨 Added to history, total states: \(drawingHistory.count)")
+                                    }
+                                )
+                                .id("pencilkit-image-\(layer.id)-\(drawingData.count)")
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .allowsHitTesting(true)
+                                .zIndex(2000) // Above everything when drawing to receive all touches
+                            }
+                            
+                            // Selection border - fit to actual content bounds if image has transparency
+                            // Hide border when actively drawing on this image
+                            if selectedImageId == layer.id && !(isDrawing && currentDrawingImageId == layer.id) {
+                                let borderSize = imageHasTransparency(ui) ? tightBoundsSize(for: ui, baseSize: baseSize) : baseSize
                                 RoundedRectangle(cornerRadius: 8)
                                     .stroke(Color.blue, lineWidth: 3)
-                                    .frame(width: baseSize.width, height: baseSize.height)
+                                    .frame(width: borderSize.width, height: borderSize.height)
                                     .allowsHitTesting(false)
                             }
                             
-                            // Gesture overlay (only when NOT erasing)
-                            if !isErasing {
+                            // Gesture overlay (only when NOT erasing and NOT drawing on this image)
+                            if !isErasing && !(isDrawing && currentDrawingImageId == layer.id) {
                                 Group {
                                     if selectedTool == .tear {
                                         // Tear mode: only tap to select, no transform gestures
@@ -632,51 +665,39 @@ struct CollageEditorView: View {
                                                 }
                                             ))
                                             .simultaneousGesture(
-                                                // Triple tap - highest priority
-                                                TapGesture(count: 3)
-                                                    .onEnded {
-                                                        print("🗑️ Triple tap detected!")
-                                                        // Play three clicks for triple tap
-                                                        SoundEffectPlayer.shared.playClick()
-                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                                            SoundEffectPlayer.shared.playClick()
-                                                        }
-                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
-                                                            SoundEffectPlayer.shared.playClick()
-                                                        }
-                                                        // Delay deletion to avoid gesture conflicts
-                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                                            self.deleteImage(layer: layer)
-                                                        }
-                                                    }
-                                            )
-                                            .simultaneousGesture(
-                                                // Double tap
+                                                // Double tap - delete image (reversible with undo)
                                                 TapGesture(count: 2)
                                                     .onEnded {
-                                                        print("🔼 Double tap detected on layer: \(layer.id)")
+                                                        print("🗑️ Double tap detected - deleting image: \(layer.id)")
                                                         // Play two clicks for double tap
                                                         SoundEffectPlayer.shared.playClick()
                                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                                             SoundEffectPlayer.shared.playClick()
                                                         }
-                                                        bringToFront(layer: layer)
+                                                        // Delay deletion to avoid gesture conflicts
+                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                            self.deleteImage(layer: layer)
+                                                        }
                                                     }
                                             )
                                             .simultaneousGesture(
-                                                // Single tap
+                                                // Single tap - bring to front and select
                                                 TapGesture(count: 1)
                                                     .onEnded {
-                                                        print("👆 Single tap detected!")
-                                                        // Play click sound when selecting image
+                                                        print("👆 Single tap detected - bringing to front!")
+                                                        // Play click sound
                                                         SoundEffectPlayer.shared.playClick()
-                                                        // Single tap selects image and shows toolbar
+                                                        // Single tap brings image to front and selects it
+                                                        bringToFront(layer: layer)
+                                                        // Reset tool state when selecting a new image (no tools active)
+                                                        selectedTool = .pen
+                                                        isDrawing = false
+                                                        showDrawingToolbar = false
+                                                        currentDrawingImageId = nil
                                                         withAnimation(.easeInOut(duration: 0.2)) {
                                                             selectedImageId = layer.id
                                                             showToolbarForSelectedImage = true
                                                         }
-                                                        // Automatically remove background if image contains a person
-                                                        autoRemoveBackground(for: layer.id)
                                                     }
                                             )
                                             .simultaneousGesture(
@@ -686,7 +707,7 @@ struct CollageEditorView: View {
                                                         sendToBack(layer: layer)
                                                     }
                                             )
-                                            .zIndex(isDrawing ? 1001 : 10) // Above PencilKit when drawing
+                                            .zIndex(10)
                                     }
                                 }
                             }
@@ -696,7 +717,7 @@ struct CollageEditorView: View {
                         .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
                         .opacity(canvasMode == .canvas && isDrawing && currentDrawingImageId == nil ? 0.6 : 1.0) // Dim only when drawing on global canvas (helps see paint)
                         .zIndex(Double(layer.zIndex))
-                        .id("\(layer.id)-\(layer.erasedImageFileName ?? "orig")")
+                        .id("\(layer.id)-\(layer.imageFileName)-\(refreshTrigger)")
                     }
                 }
                 
@@ -732,9 +753,12 @@ struct CollageEditorView: View {
                     .zIndex(2000 + Double(layer.zIndex)) // High zIndex to render on top, but only captures touches on actual text
                 }
                 
-                // Show saved global canvas drawing (when not actively drawing)
-                if !isDrawing, let base64 = project.drawingDataBase64,
-                   let drawingDataForCanvas = Data(base64Encoded: base64) {
+                // Show saved global canvas drawing (only when NOT drawing at all, to avoid conflicts)
+                // CRITICAL: Only show when NOT drawing on anything (not image, not canvas)
+                if !isDrawing && currentDrawingImageId == nil, 
+                   let base64 = project.drawingDataBase64,
+                   let drawingDataForCanvas = Data(base64Encoded: base64),
+                   !drawingDataForCanvas.isEmpty {
                     ImageBoundDrawingView(
                         drawingData: drawingDataForCanvas,
                         imageSize: canvasSize,
@@ -745,60 +769,34 @@ struct CollageEditorView: View {
                     .zIndex(500) // Above images, below active drawing
                 }
                 
-                // PencilKit drawing layer - positioned over selected image OR full canvas
-                if isDrawing {
-                    if let imageId = currentDrawingImageId,
-                       let layer = project.imageLayers.first(where: { $0.id == imageId }),
-                       let ui = loadImage(fileName: layer.imageFileName) {
-                        // IMAGE-SPECIFIC DRAWING
-                        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
-                        
-                        PencilKitView(
-                            drawingData: $drawingData,
-                            isDrawingEnabled: true,
-                            isEraseMode: false,
-                            strokeColor: strokeColor,
-                            strokeWidth: strokeWidth,
-                            onDrawingChanged: { newData in
-                                print("🎨 Drawing changed, data size: \(newData.count) bytes")
-                                if !drawingHistory.isEmpty && drawingHistory.last == newData {
-                                    print("🎨 Skipping duplicate")
-                                    return
-                                }
-                                drawingHistory.append(newData)
-                                print("🎨 Added to history, total states: \(drawingHistory.count)")
+                // PencilKit drawing layer - global canvas drawing ONLY (image-specific drawing is inside image ZStack)
+                // CRITICAL: Only show when actively drawing on global canvas (currentDrawingImageId must be nil)
+                // Supports both drawing AND erasing drawings on global canvas
+                // Both image drawing erase and global canvas drawing erase use the same drawingData binding
+                // so they benefit from the same fixes (no auto-save, Done button saves to correct place)
+                if isDrawing && currentDrawingImageId == nil {
+                    // GLOBAL CANVAS DRAWING
+                    PencilKitView(
+                        drawingData: $drawingData,
+                        isDrawingEnabled: true,
+                        isEraseMode: false, // Currently always false, but if enabled would use same drawingData binding
+                        strokeColor: strokeColor,
+                        strokeWidth: strokeWidth,
+                        expectedSize: canvasSize, // CRITICAL: Pass expected size for bounds matching
+                        onDrawingChanged: { newData in
+                            print("🎨 Global canvas drawing changed, data size: \(newData.count) bytes")
+                            if !drawingHistory.isEmpty && drawingHistory.last == newData {
+                                print("🎨 Skipping duplicate")
+                                return
                             }
-                        )
-                        .id("pencilkit-image-\(imageId)-\(drawingData.count)")
-                        .frame(width: baseSize.width, height: baseSize.height)
-                        .scaleEffect(layer.transform.scale)
-                        .rotationEffect(.radians(layer.transform.rotation))
-                        .offset(x: layer.transform.x, y: layer.transform.y)
-                        .allowsHitTesting(true)
-                        .zIndex(1000)
-                    } else {
-                        // GLOBAL CANVAS DRAWING
-                        PencilKitView(
-                            drawingData: $drawingData,
-                            isDrawingEnabled: true,
-                            isEraseMode: false,
-                            strokeColor: strokeColor,
-                            strokeWidth: strokeWidth,
-                            onDrawingChanged: { newData in
-                                print("🎨 Global canvas drawing changed, data size: \(newData.count) bytes")
-                                if !drawingHistory.isEmpty && drawingHistory.last == newData {
-                                    print("🎨 Skipping duplicate")
-                                    return
-                                }
-                                drawingHistory.append(newData)
-                                print("🎨 Added to history, total states: \(drawingHistory.count)")
-                            }
-                        )
-                        .id("pencilkit-canvas-\(drawingData.count)")
-                        .frame(width: canvasSize.width, height: canvasSize.height)
-                        .allowsHitTesting(true)
-                        .zIndex(1000)
-                    }
+                            drawingHistory.append(newData)
+                            print("🎨 Added to history, total states: \(drawingHistory.count)")
+                        }
+                    )
+                    .id("pencilkit-canvas-\(drawingData.count)")
+                    .frame(width: canvasSize.width, height: canvasSize.height)
+                    .allowsHitTesting(true)
+                    .zIndex(1000)
                 }
                 
                 // Tear gesture overlay when image is selected - with pressure sensitivity
@@ -881,52 +879,79 @@ struct CollageEditorView: View {
                 showDrawingToolbar = false
             }
             
-            // 3. Tear (always visible, disabled if no image selected) - throb if image selected and no tear/erase/design used yet
+            // 3. Mask/Remove Background (always visible, disabled if no image selected) - throb if image selected and no mask/erase/design used yet
             ToolbarGridButton(
-                icon: "scissors",
-                isDisabled: !showToolbarForSelectedImage,
-                shouldThrob: showToolbarForSelectedImage && doneClickCount == 0
+                icon: "person.crop.circle.fill",
+                isDisabled: !showToolbarForSelectedImage || isRemovingBackground,
+                shouldThrob: showToolbarForSelectedImage && doneClickCount == 0,
+                isSelected: false // Mask is not a persistent tool state
             ) {
-                selectedTool = .tear
+                guard let imageId = selectedImageId else { return }
+                print("🎭 Mask button clicked - removing background for image: \(imageId)")
+                autoRemoveBackground(for: imageId)
+                selectedTool = .pen // Reset tool after mask action
                 showDrawingToolbar = false
             }
             
-            // 4. Erase (always visible, disabled if no image selected)
+            // 4. Erase (always visible, disabled if no image selected) - toggle on/off
             ToolbarGridButton(
                 icon: "eraser",
-                isDisabled: !showToolbarForSelectedImage
+                isDisabled: !showToolbarForSelectedImage,
+                isSelected: selectedTool == .erase
             ) {
                 print("🧹 Erase button clicked. Selected image: \(String(describing: selectedImageId))")
-                selectedTool = .erase
-                showDrawingToolbar = false
-                print("🧹 After setting tool. Selected image: \(String(describing: selectedImageId))")
+                // Toggle: if already erase, deactivate; otherwise activate
+                if selectedTool == .erase {
+                    selectedTool = .pen
+                    showDrawingToolbar = false
+                    print("🧹 Erase deactivated")
+                } else {
+                    selectedTool = .erase
+                    showDrawingToolbar = false
+                    print("🧹 Erase activated")
+                }
             }
             
-            // 5. Design/Draw (always visible, disabled if no image selected)
+            // 5. Design/Draw (always visible, disabled if no image selected) - toggle on/off
             ToolbarGridButton(
                 icon: "paintbrush",
-                isDisabled: !showToolbarForSelectedImage
+                isDisabled: !showToolbarForSelectedImage,
+                isSelected: (selectedTool == .pen || selectedTool == .brush) && isDrawing && currentDrawingImageId == selectedImageId
             ) {
                 guard let imageId = selectedImageId,
                       let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) else { return }
                 
-                selectedTool = .pen
-                showDrawingToolbar = true
-                isDrawing = true
-                currentDrawingImageId = imageId
-                
-                // Load existing drawing for this image
-                if let base64 = project.imageLayers[idx].drawingDataBase64,
-                   let data = Data(base64Encoded: base64) {
-                    drawingData = data
-                    drawingHistory = [data]
+                // Toggle: if already drawing on this image, deactivate; otherwise activate
+                if isDrawing && currentDrawingImageId == imageId && (selectedTool == .pen || selectedTool == .brush) {
+                    // Deactivate drawing
+                    selectedTool = .pen
+                    showDrawingToolbar = false
+                    isDrawing = false
+                    currentDrawingImageId = nil
+                    print("🎨 Drawing deactivated for image: \(imageId)")
                 } else {
-                    // Start fresh
-                    drawingData = Data()
-                    drawingHistory = [Data()]
+                    // Activate drawing
+                    selectedTool = .pen
+                    showDrawingToolbar = true
+                    isDrawing = true
+                    currentDrawingImageId = imageId
+                    
+                    // CAPTURE THE STATE BEFORE DRAWING STARTS
+                    drawingStateBeforeEdit = project.imageLayers[idx].drawingDataBase64
+                    
+                    // Load existing drawing for this image
+                    if let base64 = project.imageLayers[idx].drawingDataBase64,
+                       let data = Data(base64Encoded: base64) {
+                        drawingData = data
+                        drawingHistory = [data]
+                    } else {
+                        // Start fresh
+                        drawingData = Data()
+                        drawingHistory = [Data()]
+                    }
+                    
+                    print("🎨 Started drawing on image: \(imageId)")
                 }
-                
-                print("🎨 Started drawing on image: \(imageId)")
             }
             
             // 6. Done / Save
@@ -994,38 +1019,51 @@ struct CollageEditorView: View {
             undoLastAction()
         }
         
-        // 2. Design (draw on global canvas)
+        // 2. Design (draw on global canvas) - toggle on/off
         ToolbarGridButton(
             icon: "paintbrush",
-            isDisabled: false
+            isDisabled: false,
+            isSelected: isDrawing && currentDrawingImageId == nil // Selected when drawing on global canvas
         ) {
-            selectedTool = .pen
-            showDrawingToolbar = true
-            isDrawing = true
-            currentDrawingImageId = nil // Draw on global canvas
-            
-            // CAPTURE THE STATE BEFORE DRAWING STARTS
-            drawingStateBeforeEdit = project.drawingDataBase64
-            print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
-            
-            // Load existing global drawing
-            if let base64 = project.drawingDataBase64,
-               let data = Data(base64Encoded: base64) {
-                drawingData = data
-                drawingHistory = [data]
+            // Toggle: if already drawing on global canvas, deactivate; otherwise activate
+            if isDrawing && currentDrawingImageId == nil && (selectedTool == .pen || selectedTool == .brush) {
+                // Deactivate drawing
+                selectedTool = .pen
+                showDrawingToolbar = false
+                isDrawing = false
+                currentDrawingImageId = nil
+                print("🎨 Drawing deactivated on global canvas")
             } else {
-                // Start fresh
-                drawingData = Data()
-                drawingHistory = [Data()]
+                // Activate drawing
+                selectedTool = .pen
+                showDrawingToolbar = true
+                isDrawing = true
+                currentDrawingImageId = nil // Draw on global canvas
+                
+                // CAPTURE THE STATE BEFORE DRAWING STARTS
+                drawingStateBeforeEdit = project.drawingDataBase64
+                print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
+                
+                // Load existing global drawing
+                if let base64 = project.drawingDataBase64,
+                   let data = Data(base64Encoded: base64) {
+                    drawingData = data
+                    drawingHistory = [data]
+                } else {
+                    // Start fresh
+                    drawingData = Data()
+                    drawingHistory = [Data()]
+                }
+                
+                print("🎨 Started drawing on global canvas")
             }
-            
-            print("🎨 Started drawing on global canvas")
         }
         
         // 3. Text
         ToolbarGridButton(
             icon: "textformat",
-            isDisabled: false
+            isDisabled: false,
+            isSelected: false // Text is not a persistent tool state
         ) {
             addTextLayer()
         }
@@ -1058,28 +1096,49 @@ struct CollageEditorView: View {
                 print("   project.drawingDataBase64: \(project.drawingDataBase64?.prefix(20) ?? "nil")")
                 
             withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                    // Save drawing even if toolbar is closed (user may have closed it already)
-                    let previousDrawingBase64 = project.drawingDataBase64
-                    let base64 = drawingData.base64EncodedString()
-                    let newBase64 = base64.isEmpty ? nil : base64
-                    
-                    // Add to undo stack if there's ANY drawing data (new or changed)
-                    if newBase64 != nil && previousDrawingBase64 != newBase64 {
-                        let dummyId = UUID()
-                        undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
-                        print("🎨 Added global canvas drawing to undo stack (layerId: \(dummyId))")
-                        print("🔄 Undo stack now has \(undoStack.count) items")
-                    } else if newBase64 == nil {
-                        print("⚠️ No drawing data to save")
-                    } else {
-                        print("⚠️ Drawing unchanged, not adding to undo stack")
-                    }
-                    
-                    // Save the drawing
-                    if newBase64 != nil {
-                        project.drawingDataBase64 = newBase64
+                    // CRITICAL: Check if we're drawing on an image first
+                    // If drawing on an image, save to image layer (NOT global canvas)
+                    if let imageId = currentDrawingImageId,
+                       let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) {
+                        // Drawing on a specific image - save to image layer
+                        let previousDrawingBase64 = project.imageLayers[idx].drawingDataBase64
+                        let base64 = drawingData.base64EncodedString()
+                        let newBase64 = base64.isEmpty ? nil : base64
+                        
+                        // Only add to undo stack if drawing actually changed
+                        if previousDrawingBase64 != newBase64 {
+                            undoStack.append(.draw(layerId: imageId, previousDrawingBase64: previousDrawingBase64))
+                            print("🎨 ✅ Done: Added image drawing to undo stack")
+                        }
+                        
+                        project.imageLayers[idx].drawingDataBase64 = newBase64
                         store.update(project)
-                        print("🎨 Saved drawing to global canvas")
+                        print("🎨 Done: Saved drawing to image: \(imageId), data size: \(drawingData.count) bytes")
+                    } else {
+                        // Drawing on global canvas (currentDrawingImageId is nil)
+                        // Save drawing even if toolbar is closed (user may have closed it already)
+                        let previousDrawingBase64 = project.drawingDataBase64
+                        let base64 = drawingData.base64EncodedString()
+                        let newBase64 = base64.isEmpty ? nil : base64
+                        
+                        // Add to undo stack if there's ANY drawing data (new or changed)
+                        if newBase64 != nil && previousDrawingBase64 != newBase64 {
+                            let dummyId = UUID()
+                            undoStack.append(.draw(layerId: dummyId, previousDrawingBase64: previousDrawingBase64))
+                            print("🎨 Added global canvas drawing to undo stack (layerId: \(dummyId))")
+                            print("🔄 Undo stack now has \(undoStack.count) items")
+                        } else if newBase64 == nil {
+                            print("⚠️ No drawing data to save")
+                        } else {
+                            print("⚠️ Drawing unchanged, not adding to undo stack")
+                        }
+                        
+                        // Save the drawing
+                        if newBase64 != nil {
+                            project.drawingDataBase64 = newBase64
+                            store.update(project)
+                            print("🎨 Saved drawing to global canvas")
+                        }
                     }
                     
                 // Close drawing toolbar if open
@@ -1106,6 +1165,7 @@ struct CollageEditorView: View {
         var isDisabled: Bool = false
         var isAccent: Bool = false
         var shouldThrob: Bool = false // Suggest this button to user
+        var isSelected: Bool = false // Make tool prominent when active
         let action: () -> Void
         
         @State private var throbScale: CGFloat = 1.0
@@ -1120,7 +1180,7 @@ struct CollageEditorView: View {
                         .frame(width: 50, height: 50)
                         .offset(y: isPressed ? 1 : 3)
                     
-                    // Main button
+                    // Main button - highlighted when selected with black border
                     RoundedRectangle(cornerRadius: 12)
                         .fill(
                             LinearGradient(
@@ -1134,25 +1194,32 @@ struct CollageEditorView: View {
                         )
                         .frame(width: 50, height: 50)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(
-                                    LinearGradient(
-                                        colors: [
-                                            Color.white.opacity(0.8),
-                                            Color.black.opacity(0.2)
-                                        ],
-                                        startPoint: .top,
-                                        endPoint: .bottom
-                                    ),
-                                    lineWidth: 1
-                                )
+                            Group {
+                                if isSelected {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.black, lineWidth: 2.5)
+                                } else {
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color.white.opacity(0.8),
+                                                    Color.black.opacity(0.2)
+                                                ],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            ),
+                                            lineWidth: 1
+                                        )
+                                }
+                            }
                         )
-                        .shadow(color: Color.black.opacity(0.15), radius: 2, x: 0, y: 1)
+                        .shadow(color: Color.black.opacity(0.15), radius: isSelected ? 4 : 2, x: 0, y: 1)
                         .offset(y: isPressed ? 2 : 0)
                     
-                    // Icon
+                    // Icon - black when selected
                     Image(systemName: icon)
-                        .font(.system(size: 22, weight: .regular))
+                        .font(.system(size: 22, weight: isSelected ? .semibold : .regular))
                         .foregroundStyle(.black)
                         .offset(y: isPressed ? 2 : 0)
                 }
@@ -1160,6 +1227,8 @@ struct CollageEditorView: View {
             .buttonStyle(PressableButtonStyle(isPressed: $isPressed))
             .disabled(isDisabled || icon.isEmpty)
             .opacity(isDisabled || icon.isEmpty ? 0.3 : 1.0)
+            .scaleEffect(isSelected ? 1.05 : 1.0) // Slightly larger when selected
+            .animation(.easeInOut(duration: 0.2), value: isSelected)
         }
     }
     
@@ -1308,32 +1377,53 @@ struct CollageEditorView: View {
             }
             
             // Calculate image position on canvas (same as tear tool)
+            // SwiftUI applies transforms in order: scale -> rotation -> offset
+            // So we need to reverse: undo offset -> undo rotation -> undo scale
             let canvasSize = self.bounds.size
             let baseSize = self.calculateBaseImageSize(for: currentImage, canvasSize: canvasSize)
             let transform = layer.transform
             
             let imageCenterX = canvasSize.width / 2 + transform.x
             let imageCenterY = canvasSize.height / 2 + transform.y
-            
-            let scaledWidth = baseSize.width * transform.scale
-            let scaledHeight = baseSize.height * transform.scale
-            
-            let imageLeft = imageCenterX - scaledWidth / 2
-            let imageTop = imageCenterY - scaledHeight / 2
+            let imageCenter = CGPoint(x: imageCenterX, y: imageCenterY)
             
             // Convert canvas points to image pixel coordinates
+            // CRITICAL: Account for rotation and scale by reversing the transform chain
             let imagePoints = self.erasePoints.compactMap { data -> (point: CGPoint, pressure: Double)? in
-                let canvasPoint = data.point
-                let relativeX = canvasPoint.x - imageLeft
-                let relativeY = canvasPoint.y - imageTop
+                var canvasPoint = data.point
                 
-                let normalizedX = relativeX / scaledWidth
-                let normalizedY = relativeY / scaledHeight
+                // Step 1: Undo offset - translate relative to image center
+                canvasPoint.x -= imageCenter.x
+                canvasPoint.y -= imageCenter.y
                 
+                // Step 2: Undo rotation - rotate back by -rotation
+                if transform.rotation != 0 {
+                    let cosRotation = cos(-transform.rotation)
+                    let sinRotation = sin(-transform.rotation)
+                    let rotatedX = canvasPoint.x * cosRotation - canvasPoint.y * sinRotation
+                    let rotatedY = canvasPoint.x * sinRotation + canvasPoint.y * cosRotation
+                    canvasPoint = CGPoint(x: rotatedX, y: rotatedY)
+                }
+                
+                // Step 3: Undo scale - divide by scale to get baseSize coordinates
+                // Now canvasPoint is in baseSize space, centered at origin
+                let baseX = canvasPoint.x / transform.scale
+                let baseY = canvasPoint.y / transform.scale
+                
+                // Step 4: Convert from baseSize space (centered at origin) to image pixel coordinates
+                // baseSize is centered at origin, so convert: (-baseSize/2 to +baseSize/2) -> (0 to imageSize)
+                let normalizedX = (baseX / baseSize.width) + 0.5 // 0.0 to 1.0
+                let normalizedY = (baseY / baseSize.height) + 0.5
+                
+                // Step 5: Convert to image pixel coordinates
                 let imageX = normalizedX * currentImage.size.width
                 let imageY = normalizedY * currentImage.size.height
                 
-                return (point: CGPoint(x: imageX, y: imageY), pressure: data.pressure)
+                // Clamp to image bounds
+                let clampedX = max(0, min(currentImage.size.width, imageX))
+                let clampedY = max(0, min(currentImage.size.height, imageY))
+                
+                return (point: CGPoint(x: clampedX, y: clampedY), pressure: data.pressure)
             }
             
             guard imagePoints.count >= 2 else {
@@ -1772,6 +1862,15 @@ struct CollageEditorView: View {
                 undoStack.append(.addImage(layer: layer))
             }
         }
+        
+        // Reset tool state when images are added - no tools should be active
+        selectedTool = .pen
+        isDrawing = false
+        showDrawingToolbar = false
+        selectedImageId = nil
+        showToolbarForSelectedImage = false
+        currentDrawingImageId = nil
+        
         store.update(project)
     }
     
@@ -1806,6 +1905,132 @@ struct CollageEditorView: View {
             width = height * aspect
         }
         return CGSize(width: width, height: height)
+    }
+    
+    /// Check if an image has transparency (alpha channel with actual transparent pixels)
+    private func imageHasTransparency(_ image: UIImage) -> Bool {
+        guard let cgImage = image.cgImage else { return false }
+        let alphaInfo = cgImage.alphaInfo
+        // Check if image format supports alpha channel
+        let hasAlphaChannel = alphaInfo == .first || alphaInfo == .last || 
+                               alphaInfo == .premultipliedFirst || alphaInfo == .premultipliedLast
+        
+        // If no alpha channel support, definitely no transparency
+        guard hasAlphaChannel else { return false }
+        
+        // Quick check: sample corners to see if there's transparency
+        // This is a heuristic - if corners are transparent, likely background was removed
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0 && height > 0 else { return false }
+        
+        // Sample a few pixels at corners (where background usually is)
+        // If any corner is transparent, assume image has transparency
+        let samplePoints = [
+            (x: 0, y: 0),                    // Top-left
+            (x: width - 1, y: 0),            // Top-right
+            (x: 0, y: height - 1),           // Bottom-left
+            (x: width - 1, y: height - 1)    // Bottom-right
+        ]
+        
+        // Use a simpler approach: extract pixel data directly
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return false }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let pixelData = context.data else { return false }
+        let data = pixelData.assumingMemoryBound(to: UInt8.self)
+        
+        // Check sample points for transparency
+        for point in samplePoints {
+            let pixelIndex = (point.y * width + point.x) * bytesPerPixel
+            let alpha = data[pixelIndex + 3]
+            if alpha < 255 {
+                return true // Found transparent pixel
+            }
+        }
+        
+        return false
+    }
+    
+    /// Calculate the tight bounds of non-transparent content in an image
+    /// Returns the bounding box as a CGRect in image coordinates (0,0 to imageSize)
+    private func tightBounds(of image: UIImage) -> CGRect? {
+        guard let cgImage = image.cgImage else { return nil }
+        
+        let width = cgImage.width
+        let height = cgImage.height
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bytesPerPixel = 4
+        let bytesPerRow = bytesPerPixel * width
+        let bitsPerComponent = 8
+        
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let pixelData = context.data else { return nil }
+        
+        let data = pixelData.assumingMemoryBound(to: UInt8.self)
+        
+        var minX = width
+        var minY = height
+        var maxX = 0
+        var maxY = 0
+        
+        // Scan for non-transparent pixels
+        for y in 0..<height {
+            for x in 0..<width {
+                let pixelIndex = (y * width + x) * bytesPerPixel
+                let alpha = data[pixelIndex + 3]
+                if alpha > 0 {
+                    minX = min(minX, x)
+                    minY = min(minY, y)
+                    maxX = max(maxX, x)
+                    maxY = max(maxY, y)
+                }
+            }
+        }
+        
+        // If no opaque pixels found, return full bounds
+        if minX > maxX || minY > maxY {
+            return CGRect(origin: .zero, size: image.size)
+        }
+        
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+    
+    /// Calculate the displayed size of the tight bounds after scaling to baseSize
+    private func tightBoundsSize(for image: UIImage, baseSize: CGSize) -> CGSize {
+        guard let tightBounds = tightBounds(of: image) else {
+            return baseSize
+        }
+        
+        let imageSize = image.size
+        let scaleX = baseSize.width / imageSize.width
+        let scaleY = baseSize.height / imageSize.height
+        
+        return CGSize(
+            width: tightBounds.width * scaleX,
+            height: tightBounds.height * scaleY
+        )
     }
     
     private func calculateImagePosition(for index: Int) -> (x: Double, y: Double) {
@@ -1929,11 +2154,21 @@ struct CollageEditorView: View {
         }
         
         let layer = project.imageLayers[idx]
-        let originalFileName = layer.erasedImageFileName ?? layer.imageFileName
-        let imageURL = store.urlForProjectAsset(projectId: project.id, fileName: originalFileName)
+        let imageURL = store.urlForProjectAsset(projectId: project.id, fileName: layer.imageFileName)
         
-        guard let originalImage = UIImage(contentsOfFile: imageURL.path) else {
+        guard let currentImage = UIImage(contentsOfFile: imageURL.path) else {
             print("❌ Failed to load image for background removal")
+            return
+        }
+        
+        print("🔄 Image loaded - orientation: \(currentImage.imageOrientation.rawValue), size: \(currentImage.size)")
+        if let cgImage = currentImage.cgImage {
+            print("   CGImage dimensions: \(cgImage.width) x \(cgImage.height)")
+        }
+        
+        // Check if image already has transparency (indicating background was already removed)
+        if imageHasTransparency(currentImage) {
+            print("⚠️ Image already has background removed (has transparency), skipping")
             return
         }
         
@@ -1942,12 +2177,12 @@ struct CollageEditorView: View {
         
         Task {
             // Try to remove background
-            if let processedImage = await BackgroundRemover.removeBackground(from: originalImage) {
+            if let processedImage = await BackgroundRemover.removeBackground(from: currentImage) {
                 // Save backup of original image before replacing
                 let backupFileName = "backup_\(UUID().uuidString).jpg"
                 let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
                 
-                // Save original image data to backup
+                // Save original image data to backup (before processing)
                 guard let originalData = try? Data(contentsOf: imageURL) else {
                     print("❌ Failed to read original image data for backup")
                     await MainActor.run {
@@ -1970,6 +2205,9 @@ struct CollageEditorView: View {
                         print("✅ Background removed and saved: \(fileName)")
                         
                         await MainActor.run {
+                            // Clear cache FIRST to ensure fresh load
+                            imageCache.removeValue(forKey: layer.imageFileName)
+                            
                             // Update the layer to use the new image
                             project.imageLayers[idx].erasedImageFileName = nil // Clear erased version if any
                             store.update(project)
@@ -1980,9 +2218,16 @@ struct CollageEditorView: View {
                             undoStack.append(undoAction)
                             print("🔄 Added background removal to undo stack")
                             
-                            // Clear cache to force reload
-                            imageCache.removeValue(forKey: layer.imageFileName)
+                            // Clear selection to remove blue border after mask operation
+                            if selectedImageId == imageId {
+                                selectedImageId = nil
+                                showToolbarForSelectedImage = false
+                                print("🔄 Cleared selection after mask operation")
+                            }
+                            
+                            // Force view refresh by changing trigger
                             refreshTrigger = UUID()
+                            print("🔄 Refresh trigger updated to force UI reload")
                         }
                     } else {
                         print("❌ Failed to get PNG data from processed image")
@@ -2016,12 +2261,45 @@ struct CollageEditorView: View {
             return
         }
         
+        // If done button has been clicked, undo should deselect done instead of undoing previous action
+        if doneClickCount >= 1 {
+            print("🔄 Done is active - deselecting done instead of undoing previous action")
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                doneClickCount = 0
+            }
+            return
+        }
+        
         print("🔄 Undo stack size: \(undoStack.count)")
         print("🔄 Undo stack contents: \(undoStack.map { String(describing: $0) })")
         
-        if let last = undoStack.popLast() {
-            print("🔄 Undoing action: \(last)")
-            switch last {
+        // Skip past any addImage or deleteImage actions - images can only be deleted by double-tapping
+        // Undo should NOT delete or restore images, only other actions like drawing, erasing, masking, etc.
+        var last: UndoAction?
+        var skippedImageActions: [UndoAction] = []
+        while let action = undoStack.popLast() {
+            if case .addImage = action {
+                skippedImageActions.append(action)
+                print("⚠️ Skipping undo of add image - images can only be deleted by double-tapping")
+            } else if case .deleteImage = action {
+                skippedImageActions.append(action)
+                print("⚠️ Skipping undo of delete image - images can only be deleted by double-tapping, undo should not restore them")
+            } else {
+                last = action
+                break
+            }
+        }
+        
+        // If we skipped all actions and found nothing, put them back and return
+        guard let actionToUndo = last else {
+            // Put skipped image actions back
+            undoStack.append(contentsOf: skippedImageActions.reversed())
+            print("⚠️ No undoable actions found (all were image add/delete actions)")
+            return
+        }
+        
+        print("🔄 Undoing action: \(actionToUndo)")
+        switch actionToUndo {
             case let .split(original, pieces):
                 // Remove the two pieces and restore original
                 project.imageLayers.removeAll { layer in
@@ -2030,26 +2308,20 @@ struct CollageEditorView: View {
                 project.imageLayers.append(original)
                 store.update(project)
                 return
-            case let .addImage(layer):
-                // Remove the added image
-                project.imageLayers.removeAll { $0.id == layer.id }
-                store.update(project)
-                return
-            case let .deleteImage(layer, index):
-                // Restore the deleted image at its original index
-                if index <= project.imageLayers.count {
-                    project.imageLayers.insert(layer, at: index)
-                } else {
-                    project.imageLayers.append(layer)
-                }
-                store.update(project)
+            case .deleteImage(_, _):
+                // This should never reach here as we filter out deleteImage actions above
+                // Images can only be deleted by double-tapping, not via undo
+                // Undo should NOT restore deleted images
+                print("⚠️ deleteImage action reached switch (should have been filtered)")
                 return
             case let .erase(layerId, previousFileName):
                 // Restore previous erased state (or remove erasure)
                 if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
                     project.imageLayers[idx].erasedImageFileName = previousFileName
                     store.update(project)
+                    print("🧹 Undid erase on image: \(layerId)")
                 }
+                return
                 
             case let .removeBackground(layerId, backupFileName):
                 // Restore original image from backup
@@ -2072,6 +2344,7 @@ struct CollageEditorView: View {
                             imageCache.removeValue(forKey: layer.imageFileName)
                             refreshTrigger = UUID()
                             store.update(project)
+                            print("🔄 Undid background removal")
                         } catch {
                             print("❌ Failed to restore original image: \(error)")
                         }
@@ -2079,12 +2352,18 @@ struct CollageEditorView: View {
                         print("⚠️ Backup file not found: \(backupFileName)")
                     }
                 }
+                return
                 
             case let .draw(layerId, previousDrawingBase64):
                 // Restore previous drawing state
                 if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
                     // Undo drawing on a specific image
                     project.imageLayers[idx].drawingDataBase64 = previousDrawingBase64
+                    
+                    // Clear cache and force refresh to ensure the updated drawing is displayed
+                    imageCache.removeValue(forKey: project.imageLayers[idx].imageFileName)
+                    refreshTrigger = UUID()
+                    
                     store.update(project)
                     print("🎨 Undid drawing on image: \(layerId)")
                 } else {
@@ -2134,7 +2413,11 @@ struct CollageEditorView: View {
                 store.update(project)
                 print("✏️ Restored deleted text")
                 return
-            }
+            case .addImage(_):
+                // This should never reach here as we filter out addImage actions above
+                // Images can only be deleted by double-tapping, not via undo
+                print("⚠️ addImage action reached switch (should have been filtered)")
+                return
         }
         // fallback legacy undo if no recorded action
         // Priority: erase/text/drawing/remove image

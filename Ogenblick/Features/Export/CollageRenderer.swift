@@ -112,6 +112,20 @@ enum CollageRenderer {
                 }
 
                 image.draw(in: rect, blendMode: .normal, alpha: CGFloat(layer.opacity))
+                
+                // Render image-specific drawing if present (drawing bound to this image)
+                // CRITICAL: Must render with same transforms as the image
+                if let drawingBase64 = layer.drawingDataBase64,
+                   let drawingData = Data(base64Encoded: drawingBase64),
+                   let drawing = try? PKDrawing(data: drawingData) {
+                    // Render drawing in baseSize coordinate space (matching editor)
+                    // The drawing was saved in baseSize coordinates, so render at baseSize
+                    let drawingImage = drawing.image(from: CGRect(origin: .zero, size: baseSize), scale: UIScreen.main.scale)
+                    // Draw in the same rect as the image (already transformed)
+                    drawingImage.draw(in: rect, blendMode: .normal, alpha: CGFloat(layer.opacity))
+                    print("🎨 Drew image-specific drawing for layer \(index) at baseSize: \(baseSize)")
+                }
+                
                 ctx.restoreGState()
             }
             
