@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import UniformTypeIdentifiers
 
 enum BundleExporter {
     struct ExportedBundle {
@@ -42,8 +43,8 @@ enum BundleExporter {
         let metaData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)
         try metaData.write(to: tempDir.appendingPathComponent("metadata.json"))
         
-        // Zip the bundle
-        let bundleName = "\(project.name.replacingOccurrences(of: " ", with: "_"))_\(UUID().uuidString.prefix(8)).ogenblick"
+        // Zip the bundle - use .zip extension so it can be opened by standard zip utilities
+        let bundleName = "\(project.name.replacingOccurrences(of: " ", with: "_"))_\(UUID().uuidString.prefix(8)).zip"
         let bundleURL = FileManager.default.temporaryDirectory.appendingPathComponent(bundleName)
         try zipDirectory(at: tempDir, to: bundleURL)
         
@@ -105,23 +106,50 @@ enum BundleExporter {
     }
     
     private static func zipDirectory(at sourceURL: URL, to destinationURL: URL) throws {
-        // Simple zip using FileManager (or use Compression framework for production)
-        // For MVP, we'll just use a basic approach
+        // Use NSFileCoordinator's forUploading option which creates a proper zip file
+        // Remove destination if it exists
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        
         let coordinator = NSFileCoordinator()
-        var error: NSError?
-        coordinator.coordinate(readingItemAt: sourceURL, options: .forUploading, error: &error) { zipURL in
+        var coordinatorError: NSError?
+        var copyError: Error?
+        
+        coordinator.coordinate(readingItemAt: sourceURL, options: .forUploading, error: &coordinatorError) { zipURL in
             do {
-                if FileManager.default.fileExists(atPath: destinationURL.path) {
-                    try FileManager.default.removeItem(at: destinationURL)
-                }
+                // Copy the zip file created by the coordinator to our destination
                 try FileManager.default.copyItem(at: zipURL, to: destinationURL)
+                print("✅ Zip file copied successfully from: \(zipURL.path) to: \(destinationURL.path)")
             } catch {
-                print("Zip failed: \(error)")
+                print("❌ Zip copy failed: \(error)")
+                copyError = error
             }
         }
-        if let error = error {
-            throw error
+        
+        // Check for coordinator errors
+        if let coordinatorError = coordinatorError {
+            print("❌ File coordinator error: \(coordinatorError)")
+            throw coordinatorError
         }
+        
+        // Check for copy errors
+        if let copyError = copyError {
+            throw copyError
+        }
+        
+        // Verify the zip file was created and is valid
+        guard FileManager.default.fileExists(atPath: destinationURL.path) else {
+            throw NSError(domain: "BundleExporter", code: -4, userInfo: [NSLocalizedDescriptionKey: "Zip file was not created"])
+        }
+        
+        // Verify it's a valid zip by checking file size (should be > 0)
+        let attributes = try FileManager.default.attributesOfItem(atPath: destinationURL.path)
+        guard let fileSize = attributes[.size] as? Int, fileSize > 0 else {
+            throw NSError(domain: "BundleExporter", code: -5, userInfo: [NSLocalizedDescriptionKey: "Zip file is empty or invalid"])
+        }
+        
+        print("✅ Zip file created successfully: \(destinationURL.lastPathComponent) (\(fileSize) bytes)")
     }
 }
 

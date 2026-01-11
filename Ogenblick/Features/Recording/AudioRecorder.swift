@@ -7,6 +7,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
     private var audioRecorder: AVAudioRecorder?
     private var recordingURL: URL?
     private var meterTimer: Timer?
+    private var stopCompletion: CheckedContinuation<Void, Never>?
     
     func startRecording(to url: URL) throws {
         guard !isRecording else {
@@ -53,22 +54,41 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         meterLevel = Double(max(0.0, min(1.0, (level + 60.0) / 60.0)))
     }
     
-    func stopRecording() async {
+    func stopRecording() async -> TimeInterval? {
         guard isRecording, let recorder = audioRecorder else {
-            return
+            print("⚠️ stopRecording() called but not recording or recorder is nil")
+            return nil
+        }
+        
+        // Capture duration BEFORE stopping (recorder.currentTime is accurate while recording)
+        // Note: currentTime might be 0 immediately after starting, but should be accurate after a moment
+        let duration = recorder.currentTime
+        print("🎤 Recording duration from currentTime: \(duration)s (captured before stop)")
+        print("🎤 Recorder isRecording: \(recorder.isRecording), currentTime: \(recorder.currentTime)")
+        
+        // If currentTime is 0 or very small, it might not be accurate yet
+        // But we'll still use it if it's > 0
+        guard duration > 0 else {
+            print("⚠️ Duration is 0 or negative: \(duration)s")
+            recorder.stop()
+            await withCheckedContinuation { continuation in
+                self.stopCompletion = continuation
+            }
+            return nil
         }
         
         recorder.stop()
         // Don't set isRecording = false here - wait for delegate callback
         print("🎤 Stop recording requested")
         
-        // Wait for delegate callback and buffer flush
+        // Wait for delegate callback to complete and file to be finalized
         await withCheckedContinuation { continuation in
-            // Store continuation to resume after delegate callback
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                continuation.resume()
-            }
+            // Store continuation to resume when delegate callback completes
+            self.stopCompletion = continuation
         }
+        
+        print("🎤 stopRecording() completed, returning duration: \(duration)s")
+        return duration
     }
     
     // MARK: - AVAudioRecorderDelegate
@@ -84,6 +104,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             self.isRecording = false
             self.audioRecorder = nil
             print("🎤 Recording finished and buffer flushed")
+            
+            // Resume the continuation to signal that recording is fully finished
+            self.stopCompletion?.resume()
+            self.stopCompletion = nil
         }
     }
     
@@ -91,5 +115,9 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         print("❌ Audio recorder error: \(error?.localizedDescription ?? "Unknown error")")
         isRecording = false
         audioRecorder = nil
+        
+        // Resume continuation if waiting (critical - otherwise stopRecording() will hang)
+        stopCompletion?.resume()
+        stopCompletion = nil
     }
 }

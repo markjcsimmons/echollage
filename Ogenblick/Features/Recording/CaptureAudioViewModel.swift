@@ -22,7 +22,8 @@ class CaptureAudioViewModel: ObservableObject {
                 print("Time remaining: \(self.timeRemaining)")
                 if self.timeRemaining <= 0 {
                     self.stopTimer()
-                    self.recordingState = .finished
+                    // Don't set recordingState = .finished here - let stopRecording() handle it
+                    // This prevents the button from being enabled before duration is saved
                 }
             }
         }

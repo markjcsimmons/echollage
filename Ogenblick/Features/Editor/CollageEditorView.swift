@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AVKit
 import UIKit
+import UniformTypeIdentifiers
 
 struct CollageEditorView: View {
     @EnvironmentObject private var store: ProjectStore
@@ -14,6 +15,8 @@ struct CollageEditorView: View {
     @State private var showPaywall = false
     @State private var showLayerPanel = false
     @State private var showResetConfirmation = false
+    @State private var exportError: String?
+    @State private var showExportError = false
     @State private var drawingData: Data = Data()
     @State private var isExporting = false
     @State private var exportProgress: Double = 0
@@ -213,7 +216,7 @@ struct CollageEditorView: View {
                             selectedTool = .pen
                         }
                     } else {
-                        cycleBackground()
+                    cycleBackground()
                     }
                 }
             
@@ -281,14 +284,14 @@ struct CollageEditorView: View {
                         }
                     } label: {
                         ZStack {
-                            Circle()
+                                Circle()
                                 .fill(
                                     doneClickCount >= 2 ? Color.blue.opacity(0.9) : 
                                     doneClickCount >= 1 ? Color.green.opacity(0.9) : 
                                     Color.black.opacity(0.6)
                                 )
                                 .frame(width: 44, height: 44)
-                                .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
                             
                             Image(systemName: 
                                 doneClickCount >= 2 ? "square.and.arrow.up.fill" : 
@@ -368,15 +371,15 @@ struct CollageEditorView: View {
                             isDisabled: drawingHistory.count <= 1
                         ) {
                             SoundEffectPlayer.shared.playClick()
-                            if drawingHistory.count > 1 {
-                                drawingHistory.removeLast() // Remove current
-                                let previousData = drawingHistory.last ?? Data()
-                                drawingData = previousData
+                        if drawingHistory.count > 1 {
+                            drawingHistory.removeLast() // Remove current
+                            let previousData = drawingHistory.last ?? Data()
+                            drawingData = previousData
                                 print("🎨 Undid drawing stroke")
-                            } else if drawingHistory.count == 1 {
-                                drawingData = Data()
-                                drawingHistory = [Data()]
-                                print("🎨 Cleared all drawing")
+                        } else if drawingHistory.count == 1 {
+                            drawingData = Data()
+                            drawingHistory = [Data()]
+                            print("🎨 Cleared all drawing")
                             }
                         }
                         
@@ -442,6 +445,11 @@ struct CollageEditorView: View {
             }
         } message: {
             Text("This will delete everything and return you to the home screen to start a new moment.")
+        }
+        .alert("Export Error", isPresented: $showExportError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(exportError ?? "Unknown error occurred during export")
         }
         .overlay(
             Group {
@@ -754,21 +762,21 @@ struct CollageEditorView: View {
                 
                 // PencilKit drawing layer - canvas-wide drawing (always canvas-wide, never image-specific)
                 if isDrawing {
-                    PencilKitView(
-                        drawingData: $drawingData,
-                        isDrawingEnabled: true,
+                        PencilKitView(
+                            drawingData: $drawingData,
+                            isDrawingEnabled: true,
                         isEraseMode: selectedTool == .erase, // Enable erase mode when erase tool is selected
-                        strokeColor: strokeColor,
-                        strokeWidth: strokeWidth,
+                            strokeColor: strokeColor,
+                            strokeWidth: strokeWidth,
                         expectedSize: canvasSize, // CRITICAL: Pass expected size for bounds matching
-                        onDrawingChanged: { newData in
+                            onDrawingChanged: { newData in
                             print("🎨 Canvas drawing changed, data size: \(newData.count) bytes")
-                            if !drawingHistory.isEmpty && drawingHistory.last == newData {
-                                print("🎨 Skipping duplicate")
-                                return
-                            }
-                            drawingHistory.append(newData)
-                            print("🎨 Added to history, total states: \(drawingHistory.count)")
+                                if !drawingHistory.isEmpty && drawingHistory.last == newData {
+                                    print("🎨 Skipping duplicate")
+                                    return
+                                }
+                                drawingHistory.append(newData)
+                                print("🎨 Added to history, total states: \(drawingHistory.count)")
                         },
                         onTapOnly: {
                             // When user taps canvas (not draws), deselect paint tool
@@ -779,11 +787,11 @@ struct CollageEditorView: View {
                                 isDrawing = false
                                 selectedTool = .pen
                             }
-                        }
-                    )
-                    .id("pencilkit-canvas-\(drawingData.count)")
-                    .frame(width: canvasSize.width, height: canvasSize.height)
-                    .allowsHitTesting(true)
+                            }
+                        )
+                        .id("pencilkit-canvas-\(drawingData.count)")
+                        .frame(width: canvasSize.width, height: canvasSize.height)
+                        .allowsHitTesting(true)
                     .zIndex(1000) // Above saved drawing and images
                 }
                 
@@ -886,7 +894,7 @@ struct CollageEditorView: View {
                 print("🧹 Erase button clicked. Selected image: \(String(describing: selectedImageId))")
                 // Toggle: if already erase, deactivate; otherwise activate
                 if selectedTool == .erase {
-                    selectedTool = .pen
+                selectedTool = .pen
                     isDrawing = false
                     print("🧹 Erase deactivated")
                 } else {
@@ -897,52 +905,52 @@ struct CollageEditorView: View {
             }
             
             // 5. Paint (canvas-wide, always available) - toggle on/off
-            ToolbarGridButton(
-                icon: "paintbrush",
+        ToolbarGridButton(
+            icon: "paintbrush",
                 isDisabled: false,
                 isSelected: isDrawing // Selected when actively drawing (canvas-wide)
-            ) {
+        ) {
                 // Toggle: if already drawing, deactivate; otherwise activate
                 if isDrawing && (selectedTool == .pen || selectedTool == .brush) {
                     // Deactivate drawing - save current drawing first
                     handleDoneDrawing()
-                    selectedTool = .pen
+            selectedTool = .pen
                     isDrawing = false
                     print("🎨 Paint deactivated")
                 } else {
                     // Activate canvas-wide drawing
                     selectedTool = .pen
-                    isDrawing = true
-                    
+            isDrawing = true
+            
                     // Capture state before drawing starts
-                    drawingStateBeforeEdit = project.drawingDataBase64
-                    print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
-                    
+            drawingStateBeforeEdit = project.drawingDataBase64
+            print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
+            
                     // Load existing canvas drawing
-                    if let base64 = project.drawingDataBase64,
-                       let data = Data(base64Encoded: base64) {
-                        drawingData = data
-                        drawingHistory = [data]
-                    } else {
-                        drawingData = Data()
-                        drawingHistory = [Data()]
-                    }
-                    
-                    print("🎨 Started canvas-wide drawing")
-                }
+            if let base64 = project.drawingDataBase64,
+               let data = Data(base64Encoded: base64) {
+                drawingData = data
+                drawingHistory = [data]
+            } else {
+                drawingData = Data()
+                drawingHistory = [Data()]
             }
             
+                    print("🎨 Started canvas-wide drawing")
+                }
+        }
+        
             // 6. Text (canvas-wide, always available)
-            ToolbarGridButton(
-                icon: "textformat",
+        ToolbarGridButton(
+            icon: "textformat",
                 isDisabled: false,
                 isSelected: false // Text is not a persistent tool state
-            ) {
-                addTextLayer()
+        ) {
+            addTextLayer()
                 // Deactivate drawing when adding text
-                isDrawing = false
+                    isDrawing = false
                 selectedTool = .pen
-            }
+        }
     }
     
     // Individual grid button with 3D shadow effect
@@ -985,18 +993,18 @@ struct CollageEditorView: View {
                                     RoundedRectangle(cornerRadius: 12)
                                         .stroke(Color.black, lineWidth: 2.5)
                                 } else {
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(
-                                            LinearGradient(
-                                                colors: [
-                                                    Color.white.opacity(0.8),
-                                                    Color.black.opacity(0.2)
-                                                ],
-                                                startPoint: .top,
-                                                endPoint: .bottom
-                                            ),
-                                            lineWidth: 1
-                                        )
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.white.opacity(0.8),
+                                            Color.black.opacity(0.2)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 1
+                                )
                                 }
                             }
                         )
@@ -1927,7 +1935,7 @@ struct CollageEditorView: View {
         drawingStateBeforeEdit = nil
         print("🎨 Saved canvas drawing, data size: \(drawingData.count) bytes")
     }
-    
+
     private func addTextLayer() {
         // Don't play click here - button already plays it
         
@@ -2229,27 +2237,27 @@ struct CollageEditorView: View {
                 
             case let .draw(previousDrawingBase64):
                 // Undo canvas-wide drawing (always canvas-wide, never image-specific)
-                print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
-                
-                project.drawingDataBase64 = previousDrawingBase64
-                if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
-                    self.drawingData = drawingData
+                    print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                    print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
+                    
+                    project.drawingDataBase64 = previousDrawingBase64
+                    if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
+                        self.drawingData = drawingData
                     drawingHistory = [drawingData]
-                    print("🎨 Restored drawing data: \(drawingData.count) bytes")
-                } else {
-                    self.drawingData = Data()
+                        print("🎨 Restored drawing data: \(drawingData.count) bytes")
+                    } else {
+                        self.drawingData = Data()
                     drawingHistory = [Data()]
-                    print("🎨 Cleared drawing data (no previous drawing)")
-                }
-                
-                // Force view refresh
-                self.refreshTrigger = UUID()
-                
-                // Update store AFTER setting the data
-                store.update(project)
-                
-                print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
+                        print("🎨 Cleared drawing data (no previous drawing)")
+                    }
+                    
+                    // Force view refresh
+                    self.refreshTrigger = UUID()
+                    
+                    // Update store AFTER setting the data
+                    store.update(project)
+                    
+                    print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
                 print("🎨 Undid canvas drawing - drawing data now: \(self.drawingData.count) bytes")
                 return
             case let .addText(layer):
@@ -2312,25 +2320,192 @@ struct CollageEditorView: View {
         return store.urlForProjectAsset(projectId: project.id, fileName: name)
     }
 
-    @MainActor
     private func export() async {
+        print("🎬 Export function called")
+        
         guard purchases.canExport else {
+            print("❌ Cannot export - showing paywall")
             showPaywall = true
             return
         }
+        
+        print("✅ Export allowed, starting export process...")
+        await MainActor.run {
         isExporting = true
+            exportProgress = 0
+        }
         
         do {
-            let bundle = try BundleExporter.exportBundle(project: project, assetURLProvider: assetURL)
+            print("🎬 Step 1: Rendering collage image...")
+            // Render the collage image
+            guard let collageImage = CollageRenderer.render(project: project, assetURLProvider: assetURL) else {
+                print("❌ Failed to render collage")
+                await MainActor.run {
+                    exportError = "Failed to render collage image"
+                    showExportError = true
+                    isExporting = false
+                }
+                return
+            }
+            print("✅ Collage image rendered: \(collageImage.size)")
+            await MainActor.run {
+                exportProgress = 0.1
+            }
+            
+            print("🎬 Step 2: Checking audio...")
+            // Get audio URL and duration
+            guard let audioName = project.audioFileName else {
+                print("❌ No audio file name")
+                await MainActor.run {
+                    exportError = "No audio file found. Please record audio first."
+                    showExportError = true
+                    isExporting = false
+                }
+                return
+            }
+            
+            guard let audioURL = assetURL(for: audioName) else {
+                print("❌ Cannot get audio URL for: \(audioName)")
+                await MainActor.run {
+                    exportError = "Cannot find audio file"
+                    showExportError = true
+                    isExporting = false
+                }
+                return
+            }
+            
+            guard FileManager.default.fileExists(atPath: audioURL.path) else {
+                print("❌ Audio file does not exist at: \(audioURL.path)")
+                await MainActor.run {
+                    exportError = "Audio file not found"
+                    showExportError = true
+                    isExporting = false
+                }
+                return
+            }
+            
+            // Get duration from project, or calculate from audio file if not available
+            var duration: TimeInterval
+            if let savedDuration = project.audioDuration, savedDuration > 0 {
+                duration = savedDuration
+                print("✅ Using saved audio duration: \(duration)s")
+            } else {
+                // Calculate duration from audio file
+                print("⚠️ Audio duration not in project, calculating from file...")
+                let audioAsset = AVAsset(url: audioURL)
+                if let calculatedDuration = try? await audioAsset.load(.duration).seconds, calculatedDuration > 0 {
+                    duration = calculatedDuration
+                    print("✅ Calculated audio duration from file: \(duration)s")
+                    // Save it to the project for future use
+                    await MainActor.run {
+                        project.audioDuration = duration
+                        store.update(project)
+                    }
+                } else {
+                    print("❌ Could not calculate audio duration from file")
+                    await MainActor.run {
+                        exportError = "Could not read audio file. Please try recording again."
+                        showExportError = true
+                        isExporting = false
+                    }
+                    return
+                }
+            }
+            
+            print("✅ Audio found: \(audioURL.lastPathComponent), duration: \(duration)s")
+            await MainActor.run {
+                exportProgress = 0.2
+            }
+            
+            // Create output video URL
+            let videoName = "\(project.name.replacingOccurrences(of: " ", with: "_"))_\(UUID().uuidString.prefix(8)).mp4"
+            let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(videoName)
+            print("🎬 Step 3: Creating video at: \(videoURL.lastPathComponent)")
+            
+            // Export as MP4 video with music metadata overlay
+            try await MP4VideoExporter.export(
+                image: collageImage,
+                audioURL: audioURL,
+                duration: duration,
+                outputURL: videoURL,
+                musicMetadata: project.musicMetadata,
+                progress: { progressValue in
+                    DispatchQueue.main.async {
+                        exportProgress = 0.2 + (progressValue * 0.8) // Scale to 0.2-1.0
+                    }
+                }
+            )
+            
+            guard FileManager.default.fileExists(atPath: videoURL.path) else {
+                print("❌ Video file was not created")
+                await MainActor.run {
+                    exportError = "Video file was not created"
+                    showExportError = true
+                    isExporting = false
+                }
+                return
+            }
+            
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? Int) ?? 0
+            print("✅ Video created successfully: \(videoURL.lastPathComponent) (\(fileSize) bytes)")
+            
             purchases.registerSuccessfulExport()
             
-            // Present share sheet with bundle
-            let av = UIActivityViewController(activityItems: [bundle.bundleURL], applicationActivities: nil)
-            UIApplication.shared.firstKeyWindow?.rootViewController?.present(av, animated: true)
+            // Present share sheet on main thread - use DispatchQueue for better reliability
+            await MainActor.run {
+                isExporting = false
+            }
+            
+            // Small delay to ensure UI is ready
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            
+            await MainActor.run {
+                print("🎬 Step 4: Presenting share sheet...")
+                
+                // Find the topmost view controller using the extension method that was working before
+                guard let rootVC = UIApplication.shared.firstKeyWindow?.rootViewController else {
+                    print("❌ Cannot find root view controller")
+                    exportError = "Cannot present share sheet"
+                    showExportError = true
+                    return
+                }
+                
+                print("✅ Found root view controller: \(type(of: rootVC))")
+                
+                // Find the topmost presented view controller
+                var topViewController = rootVC
+                while let presented = topViewController.presentedViewController {
+                    topViewController = presented
+                    print("✅ Found presented view controller: \(type(of: topViewController))")
+                }
+                
+                print("✅ Using top view controller: \(type(of: topViewController))")
+                
+                // Create and present share sheet
+                let av = UIActivityViewController(activityItems: [videoURL], applicationActivities: nil)
+                
+                // For iPad support
+                if let popover = av.popoverPresentationController,
+                   let window = UIApplication.shared.firstKeyWindow {
+                    popover.sourceView = window
+                    popover.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.midY, width: 0, height: 0)
+                    popover.permittedArrowDirections = []
+                    print("✅ Configured iPad popover")
+                }
+                
+                print("✅ About to present share sheet from: \(type(of: topViewController))")
+                topViewController.present(av, animated: true) {
+                    print("✅ Share sheet presented successfully")
+                }
+            }
         } catch {
-            print("Export failed: \(error)")
-        }
+            print("❌ Export failed with error: \(error.localizedDescription)")
+            await MainActor.run {
+                exportError = "Export failed: \(error.localizedDescription)"
+                showExportError = true
         isExporting = false
+            }
+        }
     }
 
     private func assetURL(for fileName: String) -> URL? {

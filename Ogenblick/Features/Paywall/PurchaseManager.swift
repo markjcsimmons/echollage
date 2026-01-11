@@ -6,7 +6,15 @@ final class PurchaseManager: ObservableObject {
     @Published private(set) var isSubscribed: Bool = false
     @Published private(set) var freeExportsRemaining: Int = max(0, 3 - UserDefaults.standard.integer(forKey: "exportCount"))
 
-    var canExport: Bool { isSubscribed || freeExportsRemaining > 0 }
+    var canExport: Bool { 
+        // For development: allow unlimited exports
+        // TODO: Remove this before production release
+        #if DEBUG
+        return true
+        #else
+        return isSubscribed || freeExportsRemaining > 0
+        #endif
+    }
 
     func registerSuccessfulExport() {
         guard !isSubscribed else { return }
@@ -54,6 +62,14 @@ final class PurchaseManager: ObservableObject {
         }
         isSubscribed = false
     }
+    
+    // For testing: Reset export count
+    #if DEBUG
+    func resetExportCount() {
+        UserDefaults.standard.set(0, forKey: "exportCount")
+        freeExportsRemaining = 3
+    }
+    #endif
 }
 
 

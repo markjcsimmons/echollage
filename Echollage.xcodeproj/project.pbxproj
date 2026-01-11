@@ -218,9 +218,9 @@
 			isa = PBXGroup;
 			children = (
 				4DF95FBE2ED5F3FE009826EE /* LivePhotoExporter.swift */,
+				C8472F3B1DD4E7A82FB5E6C1 /* MP4VideoExporter.swift */,
 				B6383A4A0BBEA5DE66DB6A5A /* BundleExporter.swift */,
 				2190E4E24AB8A26D600D20DC /* CollageRenderer.swift */,
-				C8472F3B1DD4E7A82FB5E6C1 /* MP4VideoExporter.swift */,
 			);
 			path = Export;
 			sourceTree = "<group>";
@@ -454,11 +454,11 @@
 			files = (
 				0F8607A9401CAFA9BB8E5C8C /* ACRCloudService.swift in Sources */,
 				4DF95FBF2ED5F3FE009826EE /* LivePhotoExporter.swift in Sources */,
+				7EA99BCD9FEC51B91497C2E9 /* MP4VideoExporter.swift in Sources */,
 				49FB967B193DCDBC20D5F9AA /* AudioPlayer.swift in Sources */,
 				F889A7D1ACE098EC360AC7D3 /* AudioRecorder.swift in Sources */,
 				69BCDA1F5509437CBF332F4B /* BackgroundRemover.swift in Sources */,
 				6DA88AAD8EFC49B90386B148 /* BundleExporter.swift in Sources */,
-				7EA99BCD9FEC51B91497C2E9 /* MP4VideoExporter.swift in Sources */,
 				35D45520FB8C85971DA8B6C0 /* ButtonLayout.swift in Sources */,
 				5E0B5B5486678F9044AE28F4 /* CameraPicker.swift in Sources */,
 				9BEC3FB993A7B95B83DD285E /* CaptureAudioView.swift in Sources */,

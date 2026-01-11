@@ -17,6 +17,11 @@ struct MainFlowView: View {
     @AppStorage("hasSeenIntro") private var hasSeenIntro = false
     @State private var showIntro = false
     
+    init() {
+        // For development/testing: Reset intro flag on launch (uncomment if needed)
+        // UserDefaults.standard.set(false, forKey: "hasSeenIntro")
+    }
+    
     
     var body: some View {
         Group {
@@ -120,6 +125,7 @@ struct InitialCaptureView: View {
     @StateObject private var recorder = AudioRecorder()
     @StateObject private var viewModel = CaptureAudioViewModel()
     @State private var tempProject: Project?
+    @State private var isStoppingRecording = false
     
     var body: some View {
         ZStack {
@@ -181,8 +187,8 @@ struct InitialCaptureView: View {
                         Spacer()
                     }
                     
-                    // Centered button (hide during save/recognition)
-                    if !viewModel.isRecognizing {
+                    // Centered button (hide during save/recognition or while stopping)
+                    if !viewModel.isRecognizing && !isStoppingRecording {
                     Button {
                         SoundEffectPlayer.shared.playClick()
                         handleMainButtonTap()
@@ -270,6 +276,14 @@ struct InitialCaptureView: View {
         .animation(.easeInOut(duration: 0.3), value: viewModel.recordingState)
         .animation(.easeInOut(duration: 0.3), value: viewModel.isRecognizing)
         .animation(.easeInOut(duration: 0.3), value: viewModel.recognitionResult)
+        .onChange(of: viewModel.timeRemaining) { newValue in
+            // When timer reaches 0, automatically stop recording
+            // Use == 0 instead of <= 0 to only trigger once when transitioning from 1 to 0
+            if newValue == 0 && viewModel.recordingState == .recording && recorder.isRecording && !isStoppingRecording {
+                print("🎤 Timer reached 0, automatically stopping recording...")
+                stopRecording()
+            }
+        }
     }
     
     private var buttonGradient: LinearGradient {
@@ -311,6 +325,11 @@ struct InitialCaptureView: View {
         case .recording:
             stopRecording()
         case .finished:
+            // Only allow save if recording has finished stopping
+            guard !isStoppingRecording else {
+                print("⚠️ Cannot save - recording is still stopping")
+                return
+            }
             // Show loading indicator immediately for instant feedback
             viewModel.isRecognizing = true
             saveAndContinue()
@@ -347,11 +366,51 @@ struct InitialCaptureView: View {
     }
     
     private func stopRecording() {
+        // Prevent multiple calls
+        guard !isStoppingRecording && viewModel.recordingState == .recording else {
+            print("⚠️ stopRecording() already in progress or not recording")
+            return
+        }
+        
+        // Set flag to prevent multiple calls
+        isStoppingRecording = true
+        
+        // Calculate duration from timer BEFORE stopping (12 seconds - timeRemaining)
+        let timerDuration = 12.0 - Double(viewModel.timeRemaining)
+        print("🎤 Timer-based duration: \(timerDuration)s (12 - \(viewModel.timeRemaining))")
+        
         Task {
-            await recorder.stopRecording()
+            // Stop the recorder (it will try to capture duration from currentTime)
+            let recorderDuration = await recorder.stopRecording()
+            print("🎤 Recorder duration: \(recorderDuration?.description ?? "nil")")
+            
+            // Use recorder duration if available and > 0, otherwise use timer duration
+            // Timer duration is more reliable since it's always accurate
+            let duration = (recorderDuration != nil && recorderDuration! > 0) ? recorderDuration! : timerDuration
+            print("🎤 Final duration to save: \(duration)s")
+            
             await MainActor.run {
-        viewModel.stopTimer()
-        viewModel.recordingState = .finished
+                viewModel.stopTimer()
+                viewModel.recordingState = .finished
+                
+                // Save duration immediately
+                guard var project = tempProject else {
+                    print("❌ tempProject is nil in stopRecording()")
+                    isStoppingRecording = false
+                    return
+                }
+                
+                if duration > 0 {
+                    project.audioDuration = duration
+                    store.update(project)
+                    tempProject = project
+                    print("✅ Audio duration saved: \(duration)s")
+                } else {
+                    print("❌ Duration is 0 or negative: \(duration)s")
+                }
+                
+                // Clear flag now that stopping is complete
+                isStoppingRecording = false
             }
         }
     }
@@ -363,6 +422,7 @@ struct InitialCaptureView: View {
             store.delete(project)
         }
         tempProject = nil
+        isStoppingRecording = false  // Reset flag
         viewModel.reset()
     }
     
@@ -404,32 +464,18 @@ struct InitialCaptureView: View {
                 return
             }
             
-            // Retry loading duration up to 3 times with delays
-            var duration: TimeInterval? = nil
-            for attempt in 1...3 {
-                let audioAsset = AVAsset(url: audioURL)
-                duration = try? await audioAsset.load(.duration).seconds
-                
-                if let dur = duration, dur > 0 {
-                    print("✅ Audio duration loaded on attempt \(attempt): \(dur)s")
-                    break
-                } else {
-                    print("⚠️ Attempt \(attempt): Could not load duration, waiting...")
-                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second between retries
-                }
-            }
-            
-            await MainActor.run {
-                if let duration = duration, duration > 0 {
-                    project.audioDuration = duration
-                    print("✅ Audio duration saved: \(duration)s")
-                } else {
-                    print("❌ Could not load audio duration after 3 attempts - file may be corrupted")
+            // Use duration from project (captured from recorder before stop)
+            // This avoids needing to read the file, which may not be finalized yet
+            guard let duration = project.audioDuration, duration > 0 else {
+                print("❌ Audio duration not available in project")
+                await MainActor.run {
                     viewModel.isRecognizing = false
                     viewModel.recognitionResult = "Recording failed"
-                    return
                 }
+                return
             }
+            
+            print("✅ Using audio duration from project: \(duration)s")
             
             do {
                 if let metadata = try await ACRCloudService.recognizeMusic(fromAudioAt: audioURL) {
