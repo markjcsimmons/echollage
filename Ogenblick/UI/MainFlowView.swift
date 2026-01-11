@@ -225,8 +225,8 @@ struct InitialCaptureView: View {
                     Spacer()
                     
                     VStack(spacing: 16) {
-                    // Timer
-                    if viewModel.recordingState == .recording {
+                    // Timer - hide immediately when it reaches 0 to avoid showing "0" for long
+                    if viewModel.recordingState == .recording && viewModel.timeRemaining > 0 {
                         Text("\(viewModel.timeRemaining)s")
                             .font(.system(size: 52, weight: .thin))
                             .foregroundStyle(.white.opacity(0.9))
@@ -339,7 +339,7 @@ struct InitialCaptureView: View {
     private func startRecording() {
         // Update UI immediately for instant feedback
         viewModel.recordingState = .recording
-        viewModel.timeRemaining = 12
+        viewModel.timeRemaining = 15
         viewModel.startTimer()
         
         // Then do the setup work asynchronously
@@ -375,9 +375,9 @@ struct InitialCaptureView: View {
         // Set flag to prevent multiple calls
         isStoppingRecording = true
         
-        // Calculate duration from timer BEFORE stopping (12 seconds - timeRemaining)
-        let timerDuration = 12.0 - Double(viewModel.timeRemaining)
-        print("🎤 Timer-based duration: \(timerDuration)s (12 - \(viewModel.timeRemaining))")
+        // Calculate duration from timer BEFORE stopping (15 seconds - timeRemaining)
+        let timerDuration = 15.0 - Double(viewModel.timeRemaining)
+        print("🎤 Timer-based duration: \(timerDuration)s (15 - \(viewModel.timeRemaining))")
         
         Task {
             // Stop the recorder (it will try to capture duration from currentTime)
@@ -497,8 +497,8 @@ struct InitialCaptureView: View {
             
             await MainActor.run {
                 // Keep isRecognizing true (showing spinner) while we transition
-                // Show result for 1 second, then proceed
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                // Show result for 2 seconds, then proceed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     store.update(project)
                     onProjectCreated(project)
                     // Will be reset when view disappears

@@ -276,17 +276,17 @@ class MP4VideoExporter {
             // Draw text
             let textStyle = NSMutableParagraphStyle()
             textStyle.alignment = .center
+            textStyle.lineBreakMode = .byWordWrapping // Enable word wrapping for multi-line text
             
             // Music info (title and artist) - only if present
             if let music = musicMetadata {
                 let musicText = "\(music.title) • \(music.artist)"
                 let horizontalPadding: CGFloat = 30 // More space on each side
-                let verticalPadding: CGFloat = 15 // More space on top
+                let verticalPadding: CGFloat = 12 // Slightly reduced for better fit
                 let maxWidth = lozengeRect.width - (horizontalPadding * 2)
-                let maxHeight: CGFloat = 50 // Allow for up to 3 lines
                 
                 // Use font that allows multi-line wrapping
-                let fontSize: CGFloat = 15
+                let fontSize: CGFloat = 14 // Slightly smaller to fit 3 lines better
                 let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
                 
                 var musicAttrs: [NSAttributedString.Key: Any] = [
@@ -295,12 +295,26 @@ class MP4VideoExporter {
                     .paragraphStyle: textStyle
                 ]
                 
+                // Calculate the bounding rect for the text to see how many lines it needs
+                let constraintSize = CGSize(width: maxWidth, height: .greatestFiniteMagnitude)
+                let boundingRect = (musicText as NSString).boundingRect(
+                    with: constraintSize,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: musicAttrs,
+                    context: nil
+                )
+                
+                // Use the calculated height, but cap at 3 lines worth of height
+                let lineHeight = font.lineHeight
+                let maxHeightFor3Lines = lineHeight * 3
+                let textHeight = min(boundingRect.height, maxHeightFor3Lines)
+                
                 // Draw text with multi-line wrapping (no truncation)
                 let musicTextRect = CGRect(
                     x: lozengeRect.minX + horizontalPadding,
                     y: lozengeRect.minY + verticalPadding,
                     width: maxWidth,
-                    height: maxHeight
+                    height: textHeight
                 )
                 
                 // Use NSString drawing which supports multi-line wrapping

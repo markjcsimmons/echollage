@@ -221,9 +221,9 @@ struct CaptureAudioView: View {
             // Only update state if recording actually started
         project.audioFileName = fileName
         viewModel.recordingState = .recording
-        viewModel.timeRemaining = 12
+        viewModel.timeRemaining = 15
         viewModel.startTimer()
-            print("✅ State updated: recording, time=12")
+            print("✅ State updated: recording, time=15")
         } catch let error as NSError {
             print("❌ Failed to start recording: \(error)")
             print("❌ Error domain: \(error.domain), code: \(error.code)")

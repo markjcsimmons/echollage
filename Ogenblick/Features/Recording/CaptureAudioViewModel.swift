@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 class CaptureAudioViewModel: ObservableObject {
     @Published var recordingState: RecordingState = .idle
-    @Published var timeRemaining: Int = 12
+    @Published var timeRemaining: Int = 15
     @Published var isRecognizing = false
     @Published var recognitionResult: String?
     
@@ -37,7 +37,7 @@ class CaptureAudioViewModel: ObservableObject {
     func reset() {
         stopTimer()
         recordingState = .idle
-        timeRemaining = 12
+        timeRemaining = 15
         recognitionResult = nil
     }
 }
