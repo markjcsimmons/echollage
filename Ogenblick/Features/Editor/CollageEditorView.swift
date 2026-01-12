@@ -31,7 +31,6 @@ struct CollageEditorView: View {
     @State private var selectedTool: DrawingTool = .pen
     @State private var strokeWidth: CGFloat = 8 // Default to "Medium"
     @State private var strokeColor: Color = .white
-    @State private var refreshTrigger = UUID()
     @State private var showFullToolset = false
     @State private var selectedImageId: UUID? = nil
     @State private var selectedTextId: UUID? = nil
@@ -43,7 +42,6 @@ struct CollageEditorView: View {
     @State private var tearPathPoints: [(point: CGPoint, pressure: Double)] = []
     @State private var isTearingSelectedImage = false
     @State private var showToolbarForSelectedImage = false
-    @State private var doneClickCount = 0 // Track Done button clicks: 0 = initial, 1 = done (checkmark), 2 = ready to share (share icon)
     @State private var isTearProcessing = false
     @State private var lastTearTimestamp: Date = .distantPast // Prevent double-tear
     @State private var isRemovingBackground = false // Track background removal processing
@@ -105,8 +103,6 @@ struct CollageEditorView: View {
             PsychBackground()
         case .orange:
             ImageBackground(imageName: "orange", imageType: "png")
-        case .pattern:
-            ImageBackground(imageName: "pattern", imageType: "jpg")
         case .stripes:
             ImageBackground(imageName: "stripes", imageType: "jpg")
         case .colored:
@@ -127,6 +123,10 @@ struct CollageEditorView: View {
             VideoBackground(videoName: "waves")
         case .tiny:
             VideoBackground(videoName: "214784_tiny")
+        case .medium:
+            VideoBackground(videoName: "305858_medium")
+        case .small:
+            VideoBackground(videoName: "310961_small")
         }
     }
     
@@ -146,8 +146,6 @@ struct CollageEditorView: View {
             case .psych:
                 project.backgroundType = .orange
             case .orange:
-                project.backgroundType = .pattern
-            case .pattern:
                 project.backgroundType = .stripes
             case .stripes:
                 project.backgroundType = .colored
@@ -168,6 +166,10 @@ struct CollageEditorView: View {
             case .waves:
                 project.backgroundType = .tiny
             case .tiny:
+                project.backgroundType = .medium
+            case .medium:
+                project.backgroundType = .small
+            case .small:
                 project.backgroundType = .corkboard
             }
         }
@@ -206,13 +208,19 @@ struct CollageEditorView: View {
             backgroundView
                 .ignoresSafeArea(.all)
                 .onTapGesture {
-                    // If paint tool is active, tap to deselect it; otherwise cycle backgrounds
+                    // If paint tool is active, tap to deselect it; if erase tool is active, deselect it; otherwise cycle backgrounds
                     if isDrawing {
                         print("🎨 Background tapped while paint active - deselecting paint tool")
                         SoundEffectPlayer.shared.playClick()
                         handleDoneDrawing() // Save current drawing
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                             isDrawing = false
+                            selectedTool = .pen
+                        }
+                    } else if selectedTool == .erase {
+                        print("🧹 Background tapped while erase active - deselecting erase tool")
+                        SoundEffectPlayer.shared.playClick()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                             selectedTool = .pen
                         }
                     } else {
@@ -272,42 +280,61 @@ struct CollageEditorView: View {
             }
             .zIndex(3000)
             
-            // Done button (top right) - replaces canvas mode switch
+            // Share button (top right) - directly opens share options
             VStack {
                 HStack {
                     Spacer()
                     
                     Button {
                         SoundEffectPlayer.shared.playClick()
-                        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                            handleDoneButtonTap()
-                        }
+                        handleShareButtonTap()
                     } label: {
                         ZStack {
                                 Circle()
-                                .fill(
-                                    doneClickCount >= 2 ? Color.blue.opacity(0.9) : 
-                                    doneClickCount >= 1 ? Color.green.opacity(0.9) : 
-                                    Color.black.opacity(0.6)
-                                )
+                                .fill(Color.blue.opacity(isExporting ? 0.7 : 0.9))
                                 .frame(width: 44, height: 44)
                                     .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
                             
-                            Image(systemName: 
-                                doneClickCount >= 2 ? "square.and.arrow.up.fill" : 
-                                doneClickCount >= 1 ? "checkmark.circle.fill" : 
-                                "checkmark.circle"
-                            )
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(.white)
+                            if isExporting {
+                                ProgressView()
+                                    .tint(.white)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "square.and.arrow.up.fill")
+                                    .font(.system(size: 20, weight: .medium))
+                                    .foregroundStyle(.white)
+                            }
                         }
                     }
+                    .disabled(isExporting)
                     .padding(.top, 60)
                     .padding(.trailing, 20)
+                    
+                    // Export status text (appears next to button when exporting)
+                    if isExporting {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Preparing")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.9))
+                            Text("Échollage...")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.9))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(.black.opacity(0.6))
+                        )
+                        .padding(.top, 60)
+                        .padding(.trailing, 4)
+                        .transition(.opacity.combined(with: .move(edge: .trailing)))
+                    }
                 }
                 Spacer()
             }
             .zIndex(3000) // Above everything
+            .animation(.easeInOut(duration: 0.2), value: isExporting)
             
             // Audio playback button (always on top, outside canvas)
             if project.audioFileName != nil {
@@ -556,34 +583,96 @@ struct CollageEditorView: View {
     
     // Cache loaded images to avoid disk I/O every frame
     @State private var imageCache: [String: UIImage] = [:]
+    // Track access order for LRU cache eviction
+    @State private var imageCacheAccessOrder: [String] = []
     private let maxCacheSize = 10 // Maximum images to keep in memory
+    
+    // Cache for expensive calculations (transparency and tight bounds)
+    private struct ImageMetadata {
+        let hasTransparency: Bool
+        let tightBoundsSize: CGSize?
+    }
+    @State private var imageMetadataCache: [String: ImageMetadata] = [:]
+    
+    // Cache sorted layers to avoid sorting on every render
+    private var sortedImageLayers: [ImageLayer] {
+        project.imageLayers.sorted(by: { $0.zIndex < $1.zIndex })
+    }
+    
+    // Create layer index map for O(1) lookups
+    private var layerIndexMap: [UUID: Int] {
+        Self.createLayerIndexMap(from: project.imageLayers)
+    }
+    
+    // Static helper to create layer index map (usable from nested types)
+    private static func createLayerIndexMap(from layers: [ImageLayer]) -> [UUID: Int] {
+        var map: [UUID: Int] = [:]
+        for (index, layer) in layers.enumerated() {
+            map[layer.id] = index
+        }
+        return map
+    }
     
     private func loadImage(fileName: String) -> UIImage? {
         // Check cache first (using non-mutating access for performance)
         if let cached = imageCache[fileName] {
+            // Update access order for LRU
+            updateCacheAccessOrder(for: fileName)
             return cached
         }
         
         guard let url = assetURL(for: fileName) else { return nil }
         guard let image = UIImage(contentsOfFile: url.path) else { return nil }
         
-        // Downscale aggressively for memory
+        // Downscale aggressively for memory (synchronously to avoid race condition)
         let maxDimension: CGFloat = 1000 // Reduced for better performance
         let downsized = downscaleImage(image, maxDimension: maxDimension)
         
-        // Update cache on main thread to avoid race conditions
-        DispatchQueue.main.async {
-            // Cache with limit
-            if self.imageCache.count >= self.maxCacheSize {
-                // Remove oldest (first) entry
-                if let firstKey = self.imageCache.keys.first {
-                    self.imageCache.removeValue(forKey: firstKey)
-                }
-            }
-            self.imageCache[fileName] = downsized
+        // Cache immediately before returning to prevent race conditions
+        // Remove oldest entry if cache is full (LRU eviction)
+        if imageCache.count >= maxCacheSize, let oldestKey = imageCacheAccessOrder.first {
+            imageCache.removeValue(forKey: oldestKey)
+            imageMetadataCache.removeValue(forKey: oldestKey)
+            imageCacheAccessOrder.removeFirst()
         }
         
+        // Add to cache and access order
+        imageCache[fileName] = downsized
+        updateCacheAccessOrder(for: fileName)
+        
         return downsized
+    }
+    
+    // Update access order for LRU cache (move to end)
+    private func updateCacheAccessOrder(for fileName: String) {
+        imageCacheAccessOrder.removeAll { $0 == fileName }
+        imageCacheAccessOrder.append(fileName)
+    }
+    
+    // Cached version of imageHasTransparency
+    private func getCachedTransparency(for fileName: String, image: UIImage) -> Bool {
+        if let metadata = imageMetadataCache[fileName] {
+            return metadata.hasTransparency
+        }
+        
+        let hasTransparency = imageHasTransparency(image)
+        let metadata = ImageMetadata(hasTransparency: hasTransparency, tightBoundsSize: nil)
+        imageMetadataCache[fileName] = metadata
+        return hasTransparency
+    }
+    
+    // Cached version of tightBoundsSize
+    private func getCachedTightBoundsSize(for fileName: String, image: UIImage, baseSize: CGSize) -> CGSize {
+        if let metadata = imageMetadataCache[fileName],
+           let cachedSize = metadata.tightBoundsSize {
+            return cachedSize
+        }
+        
+        let tightSize = tightBoundsSize(for: image, baseSize: baseSize)
+        let hasTransparency = imageMetadataCache[fileName]?.hasTransparency ?? imageHasTransparency(image)
+        let metadata = ImageMetadata(hasTransparency: hasTransparency, tightBoundsSize: tightSize)
+        imageMetadataCache[fileName] = metadata
+        return tightSize
     }
     
     private var canvasView: some View {
@@ -594,13 +683,19 @@ struct CollageEditorView: View {
                 // Note: When paint is active, tapping background (above) will deselect paint
                 Color.clear
                 
-                ForEach(project.imageLayers.sorted(by: { $0.zIndex < $1.zIndex })) { layer in
+                ForEach(sortedImageLayers) { layer in
                     if let ui = loadImage(fileName: layer.imageFileName),
-                       let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
+                       let idx = layerIndexMap[layer.id] {
                         let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
 
                         // Keep same view structure always, just toggle erase mode
                         let isErasing = selectedTool == .erase && selectedImageId == layer.id
+                        
+                        // Use cached transparency and tight bounds calculations
+                        let hasTransparency = getCachedTransparency(for: layer.imageFileName, image: ui)
+                        let borderSize = selectedImageId == layer.id && !isDrawing && hasTransparency
+                            ? getCachedTightBoundsSize(for: layer.imageFileName, image: ui, baseSize: baseSize)
+                            : baseSize
                         
                         ZStack {
                             // ALWAYS show the ErasableImageView with consistent identity
@@ -624,7 +719,6 @@ struct CollageEditorView: View {
                             // Selection border - fit to actual content bounds if image has transparency
                             // Hide border when actively drawing (canvas-wide drawing)
                             if selectedImageId == layer.id && !isDrawing {
-                                let borderSize = imageHasTransparency(ui) ? tightBoundsSize(for: ui, baseSize: baseSize) : baseSize
                                 RoundedRectangle(cornerRadius: 8)
                                     .stroke(Color.blue, lineWidth: 3)
                                     .frame(width: borderSize.width, height: borderSize.height)
@@ -709,11 +803,11 @@ struct CollageEditorView: View {
                         .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
                         .opacity(isDrawing ? 0.6 : 1.0) // Dim images when drawing canvas-wide (helps see paint)
                         .zIndex(Double(layer.zIndex))
-                        .id("\(layer.id)-\(layer.imageFileName)-\(refreshTrigger)")
+                        .id("\(layer.id)-\(layer.imageFileName)")
                     }
                 }
                 
-                ForEach(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex })) { layer in
+                ForEach(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex }), id: \.id) { layer in
                     TransformableText(
                         text: layer.text,
                         fontName: layer.fontName,
@@ -875,7 +969,7 @@ struct CollageEditorView: View {
             ToolbarGridButton(
                 icon: "person.crop.circle.fill",
                 isDisabled: !showToolbarForSelectedImage || isRemovingBackground,
-                shouldThrob: showToolbarForSelectedImage && doneClickCount == 0,
+                shouldThrob: showToolbarForSelectedImage,
                 isSelected: false
             ) {
                 guard let imageId = selectedImageId else { return }
@@ -1136,7 +1230,9 @@ struct CollageEditorView: View {
             }
             
             // Average pressure for line width
-            let avgPressure = erasePoints.map { $0.pressure }.reduce(0, +) / Double(erasePoints.count)
+            // Safety check: ensure we don't divide by zero (shouldn't happen due to guard above, but defensive)
+            let pointCount = max(1, erasePoints.count)
+            let avgPressure = erasePoints.map { $0.pressure }.reduce(0, +) / Double(pointCount)
             let lineWidth = CGFloat(brushSize * (0.5 + avgPressure * 2.5))
             
             feedbackLayer?.path = path.cgPath
@@ -1152,7 +1248,7 @@ struct CollageEditorView: View {
             
             guard erasePoints.count >= 2,
                   let selectedId = selectedImageId,
-                  let idx = project.imageLayers.firstIndex(where: { $0.id == selectedId }) else {
+                  let idx = CollageEditorView.createLayerIndexMap(from: project.imageLayers)[selectedId] else {
                 print("🧹 Not enough points or no selected image")
                 erasePoints = []
                 return
@@ -1586,6 +1682,9 @@ struct CollageEditorView: View {
                     Button { showLayerPanel = true } label: { label("Layers", "square.3.layers.3d") }
 
                     Button {
+                        // Set export state immediately for visual feedback
+                        isExporting = true
+                        exportProgress = 0
                         Task { await export() }
                     } label: { label("Share", "square.and.arrow.up") }
                     .disabled(isExporting)
@@ -1637,33 +1736,108 @@ struct CollageEditorView: View {
     
     private func addImages(_ images: [UIImage]) {
         guard !images.isEmpty else { return }
-        for image in images {
+        
+        // Capture current state for background processing
+        let projectId = project.id
+        let currentLayerCount = project.imageLayers.count
+        let store = store
+        
+        // Process images on background thread for better performance
+        Task { @MainActor in
+            var newLayers: [ImageLayer] = []
+            
+            // Process all images in parallel on background thread
+            await withTaskGroup(of: ImageLayer?.self) { group in
+                for (index, image) in images.enumerated() {
+                    group.addTask {
+                        // Process image off main thread
+                        return await Task.detached(priority: .userInitiated) {
             // Downscale to max 1000px on longest side for better performance and memory
-            let downscaled = downscaleImage(image, maxDimension: 1000)
+                            let downscaled = CollageEditorView.downscaleImageStatic(image, maxDimension: 1000)
             
             let fileName = "img_\(UUID().uuidString).jpg"
             // Use 60% quality for better storage efficiency
-            if let data = downscaled.jpegData(compressionQuality: 0.60) {
-                let url = store.urlForProjectAsset(projectId: project.id, fileName: fileName)
-                try? data.write(to: url)
+                            guard let data = downscaled.jpegData(compressionQuality: 0.60) else { return nil }
+                            
+                            // urlForProjectAsset is synchronous (just returns a URL, doesn't access async state)
+                            let url = store.urlForProjectAsset(projectId: projectId, fileName: fileName)
+                            
+                            // Write file on background thread
+                            do {
+                                try data.write(to: url)
+                            } catch {
+                                print("❌ Failed to write image file \(fileName): \(error)")
+                                return nil // Return nil on write failure so this image is skipped
+                            }
                 
-                let position = calculateImagePosition(for: project.imageLayers.count)
+                            let position = CollageEditorView.calculateImagePositionStatic(for: currentLayerCount + index)
                 
                 var layer = ImageLayer(imageFileName: fileName)
-                layer.transform = Transform2D(x: position.x, y: position.y, scale: 1.4, rotation: 0) // Increased from 1.0 to 1.4 for overlap
-                layer.zIndex = project.imageLayers.count
-                project.imageLayers.append(layer)
-                undoStack.append(.addImage(layer: layer))
+                            layer.transform = Transform2D(x: position.x, y: position.y, scale: 1.4, rotation: 0)
+                            layer.zIndex = currentLayerCount + index
+                            return layer
+                        }.value
+                    }
+                }
+                
+                // Collect results
+                for await layer in group {
+                    if let layer = layer {
+                        newLayers.append(layer)
+                    }
+                }
+            }
+            
+            // Update UI on main thread
+            for layer in newLayers.sorted(by: { $0.zIndex < $1.zIndex }) {
+                self.project.imageLayers.append(layer)
+                self.undoStack.append(.addImage(layer: layer))
+            }
+            
+            // Reset tool state when images are added - no tools should be active
+            self.selectedTool = .pen
+            self.isDrawing = false
+            self.selectedImageId = nil
+            self.showToolbarForSelectedImage = false
+            
+            // Save asynchronously (already optimized in ProjectStore)
+            self.store.update(self.project)
+        }
+    }
+    
+    // Static helper functions for background thread execution
+    private static func downscaleImageStatic(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        return autoreleasepool {
+            let size = image.size
+            let maxSide = max(size.width, size.height)
+            
+            // If already small enough, return as-is
+            guard maxSide > maxDimension else { return image }
+            
+            let scale = maxDimension / maxSide
+            let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+            
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            format.opaque = false
+            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+            return renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: newSize))
             }
         }
+    }
+    
+    private static func calculateImagePositionStatic(for index: Int) -> (x: Double, y: Double) {
+        let imageWidth: Double = 187 / 2
+        let imageHeight: Double = 125
         
-        // Reset tool state when images are added - no tools should be active
-        selectedTool = .pen
-        isDrawing = false
-        selectedImageId = nil
-        showToolbarForSelectedImage = false
-        
-        store.update(project)
+        switch index {
+        case 0: return (-imageWidth, -imageHeight - 50)
+        case 1: return (imageWidth, -imageHeight - 50)
+        case 2: return (-imageWidth, imageHeight - 50)
+        case 3: return (imageWidth, imageHeight - 50)
+        default: return (0, -50)
+        }
     }
     
     private func downscaleImage(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
@@ -1744,8 +1918,12 @@ struct CollageEditorView: View {
         let data = pixelData.assumingMemoryBound(to: UInt8.self)
         
         // Check sample points for transparency
+        // Safety check: ensure pixel index is within bounds
+        let maxPixelIndex = (width * height * bytesPerPixel) - 1
         for point in samplePoints {
             let pixelIndex = (point.y * width + point.x) * bytesPerPixel
+            // Bounds check to prevent out-of-bounds access
+            guard pixelIndex >= 0 && pixelIndex <= maxPixelIndex else { continue }
             let alpha = data[pixelIndex + 3]
             if alpha < 255 {
                 return true // Found transparent pixel
@@ -1788,9 +1966,13 @@ struct CollageEditorView: View {
         var maxY = 0
         
         // Scan for non-transparent pixels
+        // Safety check: ensure we don't exceed buffer bounds
+        let maxPixelIndex = (width * height * bytesPerPixel) - 1
         for y in 0..<height {
             for x in 0..<width {
                 let pixelIndex = (y * width + x) * bytesPerPixel
+                // Bounds check to prevent out-of-bounds access
+                guard pixelIndex >= 0 && pixelIndex <= maxPixelIndex else { continue }
                 let alpha = data[pixelIndex + 3]
                 if alpha > 0 {
                     minX = min(minX, x)
@@ -1847,61 +2029,33 @@ struct CollageEditorView: View {
         }
     }
 
-    // Handle Done button tap (moved to top right)
-    // First click: marks as done (shows checkmark), saves state
-    // Second click: shows share icon and triggers export
-    private func handleDoneButtonTap() {
-        print("✅ Done button clicked, current count: \(doneClickCount)")
+    // Handle Share button tap (top right) - saves state and immediately triggers export
+    private func handleShareButtonTap() {
+        print("📤 Share button clicked")
         
-        if doneClickCount == 0 {
-            // First click: Save everything and mark as done
-            print("   First click - saving state and marking as done")
-            
-            // Save current drawing if active
-            if isDrawing {
-                handleDoneDrawing()
-            }
-            
-            // Save project state
-            store.update(project)
-            
-            // Reset tool state
-            selectedTool = .pen
-            isDrawing = false
-            
-            // Clear image selection
-            selectedImageId = nil
-            showToolbarForSelectedImage = false
-            
-            // Increment to show checkmark (doneClickCount = 1)
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                doneClickCount = 1
-            }
-        } else if doneClickCount == 1 {
-            // Second click: Show share icon and trigger export
-            print("   Second click - showing share icon and exporting")
-            
-            // Increment to show share icon (doneClickCount = 2)
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                doneClickCount = 2
-            }
-            
-            // Trigger export
-            Task {
-                await export()
-                // After export completes, reset for next time
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                        doneClickCount = 0
-                    }
-                }
-            }
-        } else {
-            // doneClickCount >= 2: Already showing share icon, just export again
-            print("   Already in share mode - exporting again")
-            Task {
-                await export()
-            }
+        // Save current drawing if active
+        if isDrawing {
+            handleDoneDrawing()
+        }
+        
+        // Save project state
+        store.update(project)
+        
+        // Reset tool state
+        selectedTool = .pen
+        isDrawing = false
+        
+        // Clear image selection
+        selectedImageId = nil
+        showToolbarForSelectedImage = false
+        
+        // Set export state immediately for visual feedback
+        isExporting = true
+        exportProgress = 0
+        
+        // Trigger export immediately
+        Task {
+            await export()
         }
     }
     
@@ -1964,7 +2118,7 @@ struct CollageEditorView: View {
     }
     
     private func bringToFront(layer: ImageLayer) {
-        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) else { return }
+        guard let idx = layerIndexMap[layer.id] else { return }
         
         // Find the maximum zIndex
         let maxZ = project.imageLayers.map { $0.zIndex }.max() ?? 0
@@ -1980,7 +2134,7 @@ struct CollageEditorView: View {
     }
     
     private func sendToBack(layer: ImageLayer) {
-        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) else { return }
+        guard let idx = layerIndexMap[layer.id] else { return }
         
         // Find the minimum zIndex
         let minZ = project.imageLayers.map { $0.zIndex }.min() ?? 0
@@ -2029,7 +2183,7 @@ struct CollageEditorView: View {
             return
         }
         
-        guard let idx = project.imageLayers.firstIndex(where: { $0.id == imageId }) else {
+        guard let idx = layerIndexMap[imageId] else {
             print("⚠️ Image not found for background removal")
             return
         }
@@ -2053,11 +2207,34 @@ struct CollageEditorView: View {
             return
         }
         
+        // Set flag immediately on main thread for immediate UI feedback
         isRemovingBackground = true
         print("🎭 Starting automatic background removal for image: \(imageId)")
         
         Task {
-            // Try to remove background
+            // CRITICAL: Check if image contains a person BEFORE attempting background removal
+            // This prevents the operation from running on images without people
+            let hasPerson = await BackgroundRemover.containsPerson(currentImage)
+            guard hasPerson else {
+                print("⚠️ No person detected in image - skipping background removal")
+                print("✅ Image file and layer remain unchanged - no modifications made")
+                await MainActor.run {
+                    // CRITICAL: Verify image still exists in array before resetting flag
+                    if let currentIdx = layerIndexMap[imageId],
+                       currentIdx < project.imageLayers.count,
+                       project.imageLayers[currentIdx].id == imageId {
+                        print("✅ Image layer confirmed still in array at index \(currentIdx)")
+                    } else {
+                        print("❌ ERROR: Image layer missing from array! This should not happen.")
+                    }
+                    isRemovingBackground = false
+                }
+                return
+            }
+            
+            print("✅ Person detected - proceeding with background removal")
+            
+            // Try to remove background (only if person was detected)
             if let processedImage = await BackgroundRemover.removeBackground(from: currentImage) {
                 // Save backup of original image before replacing
                 let backupFileName = "backup_\(UUID().uuidString).jpg"
@@ -2086,18 +2263,23 @@ struct CollageEditorView: View {
                         print("✅ Background removed and saved: \(fileName)")
                         
                         await MainActor.run {
-                            // Clear cache FIRST to ensure fresh load
+                            // Clear cache FIRST to ensure fresh load (including metadata cache)
                             imageCache.removeValue(forKey: layer.imageFileName)
+                            imageMetadataCache.removeValue(forKey: layer.imageFileName)
+                            updateCacheAccessOrder(for: layer.imageFileName)
                             
                             // Update the layer to use the new image
                             project.imageLayers[idx].erasedImageFileName = nil // Clear erased version if any
+                            
+                            // Force view refresh by updating project (this will trigger SwiftUI to re-render)
                             store.update(project)
-                            isRemovingBackground = false
                             
                             // Add undo action
                             let undoAction = UndoAction.removeBackground(layerId: layer.id, backupFileName: backupFileName)
                             undoStack.append(undoAction)
                             print("🔄 Added background removal to undo stack")
+                            
+                            isRemovingBackground = false
                             
                             // Clear selection to remove blue border after mask operation
                             if selectedImageId == imageId {
@@ -2105,10 +2287,6 @@ struct CollageEditorView: View {
                                 showToolbarForSelectedImage = false
                                 print("🔄 Cleared selection after mask operation")
                             }
-                            
-                            // Force view refresh by changing trigger
-                            refreshTrigger = UUID()
-                            print("🔄 Refresh trigger updated to force UI reload")
                         }
                     } else {
                         print("❌ Failed to get PNG data from processed image")
@@ -2127,7 +2305,9 @@ struct CollageEditorView: View {
                     }
                 }
             } else {
-                print("⚠️ Background removal failed or no person detected - keeping original image")
+                // This should rarely happen since we check for person first
+                // Background removal failed despite person being detected (processing error)
+                print("⚠️ Background removal failed despite person detection - keeping original image unchanged")
                 await MainActor.run {
                     isRemovingBackground = false
                 }
@@ -2142,39 +2322,35 @@ struct CollageEditorView: View {
             return
         }
         
-        // If done button has been clicked, undo should deselect done instead of undoing previous action
-        if doneClickCount >= 1 {
-            print("🔄 Done is active (count: \(doneClickCount)) - deselecting done instead of undoing previous action")
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                doneClickCount = 0
-            }
-            return
-        }
+        // No need to check for done button state - share button doesn't have intermediate states
         
         print("🔄 Undo stack size: \(undoStack.count)")
         print("🔄 Undo stack contents: \(undoStack.map { String(describing: $0) })")
         
-        // Skip past any addImage or deleteImage actions - images can only be deleted by double-tapping
+        // Process actions in reverse order (most recent first), skipping addImage/deleteImage
         // Undo should NOT delete or restore images, only other actions like drawing, erasing, masking, etc.
-        var last: UndoAction?
-        var skippedImageActions: [UndoAction] = []
+        var actionToUndo: UndoAction?
+        var tempStack: [UndoAction] = []
+        
+        // Pop actions until we find one that's not addImage or deleteImage
         while let action = undoStack.popLast() {
             if case .addImage = action {
-                skippedImageActions.append(action)
+                tempStack.append(action) // Keep skipped actions temporarily
                 print("⚠️ Skipping undo of add image - images can only be deleted by double-tapping")
             } else if case .deleteImage = action {
-                skippedImageActions.append(action)
-                print("⚠️ Skipping undo of delete image - images can only be deleted by double-tapping, undo should not restore them")
+                tempStack.append(action) // Keep skipped actions temporarily
+                print("⚠️ Skipping undo of delete image - images can only be deleted by double-tapping")
             } else {
-                last = action
+                actionToUndo = action // Found an undoable action
+                // Put skipped actions back in correct order (most recent last)
+                undoStack.append(contentsOf: tempStack.reversed())
                 break
             }
         }
         
-        // If we skipped all actions and found nothing, put them back and return
-        guard let actionToUndo = last else {
-            // Put skipped image actions back
-            undoStack.append(contentsOf: skippedImageActions.reversed())
+        // If no undoable action found, restore all actions to stack
+        guard let actionToUndo = actionToUndo else {
+            undoStack.append(contentsOf: tempStack.reversed())
             print("⚠️ No undoable actions found (all were image add/delete actions)")
             return
         }
@@ -2197,7 +2373,7 @@ struct CollageEditorView: View {
                 return
             case let .erase(layerId, previousFileName):
                 // Restore previous erased state (or remove erasure)
-                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
+                if let idx = layerIndexMap[layerId] {
                     project.imageLayers[idx].erasedImageFileName = previousFileName
                     store.update(project)
                     print("🧹 Undid erase on image: \(layerId)")
@@ -2206,7 +2382,7 @@ struct CollageEditorView: View {
                 
             case let .removeBackground(layerId, backupFileName):
                 // Restore original image from backup
-                if let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) {
+                if let idx = layerIndexMap[layerId] {
                     let layer = project.imageLayers[idx]
                     let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
                     let originalURL = store.urlForProjectAsset(projectId: project.id, fileName: layer.imageFileName)
@@ -2221,9 +2397,10 @@ struct CollageEditorView: View {
                             // Clean up backup file
                             try? FileManager.default.removeItem(at: backupURL)
                             
-                            // Clear cache and refresh
+                            // Clear cache and metadata (including metadata cache)
                             imageCache.removeValue(forKey: layer.imageFileName)
-                            refreshTrigger = UUID()
+                            imageMetadataCache.removeValue(forKey: layer.imageFileName)
+                            updateCacheAccessOrder(for: layer.imageFileName)
                             store.update(project)
                             print("🔄 Undid background removal")
                         } catch {
@@ -2251,9 +2428,6 @@ struct CollageEditorView: View {
                         print("🎨 Cleared drawing data (no previous drawing)")
                     }
                     
-                    // Force view refresh
-                    self.refreshTrigger = UUID()
-                    
                     // Update store AFTER setting the data
                     store.update(project)
                     
@@ -2268,10 +2442,13 @@ struct CollageEditorView: View {
                 return
             case let .deleteText(layer, index):
                 // Restore the deleted text at its original index
-                if index <= project.textLayers.count {
+                // Use <= for insert to allow inserting at end (index == count)
+                if index >= 0 && index <= project.textLayers.count {
                     project.textLayers.insert(layer, at: index)
                 } else {
+                    // Invalid index, append instead
                     project.textLayers.append(layer)
+                    print("⚠️ Invalid index \(index) for undo, appended instead")
                 }
                 store.update(project)
                 print("✏️ Restored deleted text")
@@ -2330,10 +2507,7 @@ struct CollageEditorView: View {
         }
         
         print("✅ Export allowed, starting export process...")
-        await MainActor.run {
-        isExporting = true
-            exportProgress = 0
-        }
+        // isExporting already set to true before this function is called for immediate feedback
         
         do {
             print("🎬 Step 1: Rendering collage image...")
@@ -2451,16 +2625,10 @@ struct CollageEditorView: View {
             
             purchases.registerSuccessfulExport()
             
-            // Present share sheet on main thread - use DispatchQueue for better reliability
-            await MainActor.run {
-                isExporting = false
-            }
-            
-            // Small delay to ensure UI is ready
-            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-            
+            // Present share sheet immediately - no delay needed
             await MainActor.run {
                 print("🎬 Step 4: Presenting share sheet...")
+                isExporting = false
                 
                 // Find the topmost view controller using the extension method that was working before
                 guard let rootVC = UIApplication.shared.firstKeyWindow?.rootViewController else {
@@ -2579,7 +2747,7 @@ struct CollageEditorView: View {
         }
         
         guard let selectedId = selectedImageId,
-              let idx = project.imageLayers.firstIndex(where: { $0.id == selectedId }),
+              let idx = layerIndexMap[selectedId],
               let ui = loadImage(fileName: project.imageLayers[idx].imageFileName),
               tearPathPoints.count >= 2 else {
             print("❌ Tear failed: insufficient data - selectedId: \(String(describing: selectedImageId)), points: \(tearPathPoints.count)")
@@ -2729,7 +2897,7 @@ struct CollageEditorView: View {
     private func handleTearGesture(layerId: UUID, pathPoints: [CGPoint], canvasSize: CGSize) {
         print("✂️ HANDLER: Tear gesture received for layer \(layerId)")
         
-        guard let idx = project.imageLayers.firstIndex(where: { $0.id == layerId }) else {
+        guard let idx = layerIndexMap[layerId] else {
             print("✂️ HANDLER: ❌ Layer not found")
             return
         }

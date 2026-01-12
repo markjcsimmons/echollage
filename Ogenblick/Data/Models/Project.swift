@@ -8,7 +8,6 @@ enum BackgroundType: String, Codable {
     case black
     case psych
     case orange
-    case pattern
     case stripes
     case colored
     case psychedelic
@@ -19,6 +18,8 @@ enum BackgroundType: String, Codable {
     case mountains
     case waves
     case tiny
+    case medium
+    case small
 }
 
 struct MusicMetadata: Codable, Equatable {

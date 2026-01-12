@@ -102,7 +102,7 @@ enum CollageRenderer {
                     ctx.fill(CGRect(origin: .zero, size: size))
                     print("🎨 Drew fallback black background for psych")
                 }
-            case .orange, .pattern, .stripes, .colored, .psychedelic, .floralPattern, .texture, .watercolor:
+            case .orange, .stripes, .colored, .psychedelic, .floralPattern, .texture, .watercolor:
                 // Image backgrounds - render similar to psych
                 let (imageName, imageType) = imageNameAndType(for: project.backgroundType)
                 if let bgImage = loadBackgroundImage(imageName: imageName, imageType: imageType) {
@@ -137,7 +137,7 @@ enum CollageRenderer {
                     ctx.fill(CGRect(origin: .zero, size: size))
                     print("🎨 Drew fallback black background for: \(imageName).\(imageType)")
                 }
-            case .fireworks, .mountains, .waves, .tiny:
+            case .fireworks, .mountains, .waves, .tiny, .medium, .small:
                 // Video backgrounds - extract first frame for static export
                 let videoName = videoName(for: project.backgroundType)
                 if let videoFrame = extractFirstFrame(videoName: videoName) {
@@ -344,7 +344,6 @@ enum CollageRenderer {
     private static func imageNameAndType(for backgroundType: BackgroundType) -> (name: String, type: String) {
         switch backgroundType {
         case .orange: return ("orange", "png")
-        case .pattern: return ("pattern", "jpg")
         case .stripes: return ("stripes", "jpg")
         case .colored: return ("colored-7292420_1920", "jpg")
         case .psychedelic: return ("psychedelic-9957735_1920", "jpg")
@@ -399,6 +398,8 @@ enum CollageRenderer {
         case .mountains: return "mountains"
         case .waves: return "waves"
         case .tiny: return "214784_tiny"
+        case .medium: return "305858_medium"
+        case .small: return "310961_small"
         default: return ""
         }
     }

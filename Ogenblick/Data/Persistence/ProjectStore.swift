@@ -3,11 +3,16 @@ import SwiftUI
 
 final class ProjectStore: ObservableObject {
     @Published var projects: [Project] = [] {
-        didSet { save() }
+        didSet { 
+            // Save asynchronously to avoid blocking main thread
+            saveAsync()
+        }
     }
 
     private let rootFolderName = "Projects"
     private let indexFileName = "projects.json"
+    private let saveQueue = DispatchQueue(label: "com.ogenblick.projectstore.save", qos: .utility)
+    private var saveWorkItem: DispatchWorkItem?
 
     init() {
         load()
@@ -79,6 +84,34 @@ final class ProjectStore: ObservableObject {
         } catch {
             print("Failed to save projects: \(error)")
         }
+    }
+    
+    // Async save with debouncing to avoid multiple saves in quick succession
+    private func saveAsync() {
+        // Cancel any pending save
+        saveWorkItem?.cancel()
+        
+        // Capture current projects array to avoid race conditions
+        let projectsToSave = self.projects
+        
+        // Create new save work item
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Save the captured snapshot
+            do {
+                let dir = self.documentsRoot()
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(projectsToSave)
+                try data.write(to: self.indexURL(), options: .atomic)
+            } catch {
+                print("Failed to save projects: \(error)")
+            }
+        }
+        
+        saveWorkItem = workItem
+        
+        // Debounce: wait 0.1 seconds before saving, cancel if another update comes
+        saveQueue.asyncAfter(deadline: .now() + 0.1, execute: workItem)
     }
 }
 

@@ -83,7 +83,9 @@ final class MaskCanvasView: UIView {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
         points = [t.location(in: self)]
-        print("🎨 Mask editor touch began: \(points.first!), bounds: \(bounds.size)")
+        if let firstPoint = points.first {
+            print("🎨 Mask editor touch began: \(firstPoint), bounds: \(bounds.size)")
+        }
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
@@ -115,7 +117,7 @@ final class MaskCanvasView: UIView {
             let rel = CGPoint(x: (p.x - displayed.minX) * scaleX, y: (p.y - displayed.minY) * scaleY)
             return rel
         }
-        guard maskPoints.count >= 2 else { return }
+        guard maskPoints.count >= 2, let firstPoint = maskPoints.first else { return }
 
         // Render once per stroke
         let fmt = UIGraphicsImageRendererFormat.default()
@@ -131,7 +133,7 @@ final class MaskCanvasView: UIView {
             let lw = max(1, brushSize * max(scaleX, scaleY))
             cg.setLineWidth(lw)
             cg.beginPath()
-            cg.move(to: maskPoints.first!)
+            cg.move(to: firstPoint)
             for p in maskPoints.dropFirst() { cg.addLine(to: p) }
             cg.strokePath()
         }

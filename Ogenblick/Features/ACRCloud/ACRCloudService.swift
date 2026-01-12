@@ -99,9 +99,15 @@ struct ACRCloudService {
         print("🎵 ACRCloudService: Sending request to \(host)\(httpURI)")
         print("🎵 ACRCloudService: Audio sample size: \(audioSample.count) bytes (\(audioSample.count / 1024) KB)")
         
-        // Send the request
+        // Create URLSession with timeout configuration
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.timeoutIntervalForRequest = 3.0 // 3 second timeout - quick response
+        sessionConfig.timeoutIntervalForResource = 3.0 // 3 second timeout - quick response
+        let session = URLSession(configuration: sessionConfig)
+        
+        // Send the request with timeout
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
                 print("❌ ACRCloudService: Invalid HTTP response")
@@ -188,8 +194,28 @@ struct ACRCloudService {
             )
             
         } catch {
-            print("❌ ACRCloudService: Request failed: \(error.localizedDescription)")
-            throw error
+            // Provide more specific error messages
+            let errorMessage: String
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .timedOut:
+                    errorMessage = "Unable to identify music"
+                    print("❌ ACRCloudService: Request timed out after 3 seconds")
+                case .notConnectedToInternet:
+                    errorMessage = "No internet connection. Please check your network settings."
+                    print("❌ ACRCloudService: No internet connection")
+                case .networkConnectionLost:
+                    errorMessage = "Network connection lost. Please try again."
+                    print("❌ ACRCloudService: Network connection lost")
+                default:
+                    errorMessage = "Network error: \(urlError.localizedDescription)"
+                    print("❌ ACRCloudService: Request failed with URLError: \(urlError.localizedDescription)")
+                }
+            } else {
+                errorMessage = "Recognition failed: \(error.localizedDescription)"
+                print("❌ ACRCloudService: Request failed: \(error.localizedDescription)")
+            }
+            throw NSError(domain: "ACRCloudService", code: -100, userInfo: [NSLocalizedDescriptionKey: errorMessage])
         }
     }
     

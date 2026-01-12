@@ -30,6 +30,9 @@ struct ErasableImageView: View {
         .onChange(of: erasedImageFileName) { _ in
             loadDisplayedImage()
         }
+        .onChange(of: image) { _ in
+            loadDisplayedImage()
+        }
         .allowsHitTesting(isEraseMode)
     }
     

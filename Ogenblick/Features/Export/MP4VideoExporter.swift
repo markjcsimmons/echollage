@@ -118,10 +118,12 @@ class MP4VideoExporter {
             throw ExportError.exportFailed("Failed to load video track")
         }
         
-        let compositionVideoTrack = composition.addMutableTrack(
+        guard let compositionVideoTrack = composition.addMutableTrack(
             withMediaType: .video,
             preferredTrackID: kCMPersistentTrackID_Invalid
-        )!
+        ) else {
+            throw ExportError.exportFailed("Failed to create composition video track")
+        }
         
         let videoDuration = CMTime(seconds: duration, preferredTimescale: 600)
         try compositionVideoTrack.insertTimeRange(
@@ -153,10 +155,12 @@ class MP4VideoExporter {
         let fullDuration = audioTimeRange.duration
         print("📊 Using full audio duration: \(fullDuration.seconds)s")
         
-        let compositionAudioTrack = composition.addMutableTrack(
+        guard let compositionAudioTrack = composition.addMutableTrack(
             withMediaType: .audio,
             preferredTrackID: kCMPersistentTrackID_Invalid
-        )!
+        ) else {
+            throw ExportError.exportFailed("Failed to create composition audio track")
+        }
         
         // Insert the full audio track - insertTimeRange's timeRange is relative to the source track
         // For audio files, timeRange usually starts at .zero, so we insert from .zero to fullDuration

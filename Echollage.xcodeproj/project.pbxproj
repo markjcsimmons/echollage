@@ -29,6 +29,8 @@
 		6C9F0A1B2D3E4F5A6B7C8D9E /* mountains.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 0D1E2F3A4B5C6D7E8F9A0B1C /* mountains.mp4 */; };
 		7D0A1B2C3E4F5A6B7C8D9E0F /* waves.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 1E2F3A4B5C6D7E8F9A0B1C2D /* waves.mp4 */; };
 		4A5B6C7D8E9F0A1B2C3D4E5F /* 214784_tiny.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 5B6C7D8E9F0A1B2C3D4E5F6A /* 214784_tiny.mp4 */; };
+		8E9F0A1B2C3D4E5F6A7B8C9D /* 305858_medium.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 9F0A1B2C3D4E5F6A7B8C9D0E /* 305858_medium.mp4 */; };
+		0A1B2C3D4E5F6A7B8C9D0E1F /* 310961_small.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 1B2C3D4E5F6A7B8C9D0E1F2A /* 310961_small.mp4 */; };
 		35D45520FB8C85971DA8B6C0 /* ButtonLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 350E217B6C28D39CDC6DB844 /* ButtonLayout.swift */; };
 		3BC7D19B94A502EF53F05522 /* OgenblickApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D056F039E82F457A9B85AD15 /* OgenblickApp.swift */; };
 		3F6D5CDCCB8D853B7E0E226F /* MainFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2D0F6C71A21AF73166B4344 /* MainFlowView.swift */; };
@@ -89,6 +91,8 @@
 		0D1E2F3A4B5C6D7E8F9A0B1C /* mountains.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = mountains.mp4; sourceTree = "<group>"; };
 		1E2F3A4B5C6D7E8F9A0B1C2D /* waves.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = waves.mp4; sourceTree = "<group>"; };
 		5B6C7D8E9F0A1B2C3D4E5F6A /* 214784_tiny.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "214784_tiny.mp4"; sourceTree = "<group>"; };
+		9F0A1B2C3D4E5F6A7B8C9D0E /* 305858_medium.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "305858_medium.mp4"; sourceTree = "<group>"; };
+		1B2C3D4E5F6A7B8C9D0E1F2A /* 310961_small.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "310961_small.mp4"; sourceTree = "<group>"; };
 		38020D033D0E118B8CED6828 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		41F7DC26514EA096C5A8B455 /* ACRCloudService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ACRCloudService.swift; sourceTree = "<group>"; };
 		42BB493BF4F5BE45B9D7D03A /* ImageSplitter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSplitter.swift; sourceTree = "<group>"; };
@@ -169,6 +173,8 @@
 				0D1E2F3A4B5C6D7E8F9A0B1C /* mountains.mp4 */,
 				1E2F3A4B5C6D7E8F9A0B1C2D /* waves.mp4 */,
 				5B6C7D8E9F0A1B2C3D4E5F6A /* 214784_tiny.mp4 */,
+				9F0A1B2C3D4E5F6A7B8C9D0E /* 305858_medium.mp4 */,
+				1B2C3D4E5F6A7B8C9D0E1F2A /* 310961_small.mp4 */,
 				38020D033D0E118B8CED6828 /* Info.plist */,
 				3757FC86DFEBF6DFB9D0B3A8 /* Secrets.plist */,
 				FEED42D3239CD6CE1F8B92A3 /* Secrets.sample.plist */,
@@ -419,6 +425,8 @@
 				6C9F0A1B2D3E4F5A6B7C8D9E /* mountains.mp4 in Resources */,
 				7D0A1B2C3E4F5A6B7C8D9E0F /* waves.mp4 in Resources */,
 				4A5B6C7D8E9F0A1B2C3D4E5F /* 214784_tiny.mp4 in Resources */,
+				8E9F0A1B2C3D4E5F6A7B8C9D /* 305858_medium.mp4 in Resources */,
+				0A1B2C3D4E5F6A7B8C9D0E1F /* 310961_small.mp4 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

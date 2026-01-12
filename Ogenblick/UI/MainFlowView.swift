@@ -330,8 +330,9 @@ struct InitialCaptureView: View {
                 print("⚠️ Cannot save - recording is still stopping")
                 return
             }
-            // Show loading indicator immediately for instant feedback
+            // Hide button and show loading indicator immediately for instant feedback
             viewModel.isRecognizing = true
+            // Don't set it again in saveAndContinue - already set here
             saveAndContinue()
         }
     }
@@ -352,15 +353,23 @@ struct InitialCaptureView: View {
         
         do {
             try recorder.startRecording(to: url)
+            
+            // Only save filename if recording started successfully
+            if var proj = tempProject {
+                proj.audioFileName = fileName
+                store.update(proj)
+                tempProject = proj
+            }
         } catch {
                 print("❌ Failed to start recording: \(error)")
-                // Don't create empty file - just fail gracefully
-        }
-        
-        if var proj = tempProject {
-            proj.audioFileName = fileName
-            store.update(proj)
-            tempProject = proj
+                // Reset UI state on failure
+                await MainActor.run {
+                    viewModel.recordingState = .idle
+                    viewModel.stopTimer()
+                    tempProject = nil
+                    // Show user-friendly error message
+                    viewModel.recognitionResult = "Unable to start recording. Please check microphone permissions."
+                }
         }
         }
     }
@@ -386,7 +395,12 @@ struct InitialCaptureView: View {
             
             // Use recorder duration if available and > 0, otherwise use timer duration
             // Timer duration is more reliable since it's always accurate
-            let duration = (recorderDuration != nil && recorderDuration! > 0) ? recorderDuration! : timerDuration
+            let duration: TimeInterval
+            if let recorderDuration = recorderDuration, recorderDuration > 0 {
+                duration = recorderDuration
+            } else {
+                duration = timerDuration
+            }
             print("🎤 Final duration to save: \(duration)s")
             
             await MainActor.run {
@@ -438,7 +452,7 @@ struct InitialCaptureView: View {
         }
         
         let audioURL = store.urlForProjectAsset(projectId: project.id, fileName: audioName)
-        viewModel.isRecognizing = true
+        // isRecognizing is already set to true in handleMainButtonTap() before calling this function
         
         Task {
             // Verify file exists and is readable
@@ -482,22 +496,35 @@ struct InitialCaptureView: View {
                     await MainActor.run {
                         project.musicMetadata = metadata
                         store.update(project)
+                        // Keep isRecognizing true to hide button during transition
                         viewModel.recognitionResult = "\(metadata.title)\n\(metadata.artist)"
                     }
                 } else {
                     await MainActor.run {
+                        // Keep isRecognizing true to hide button during transition
                         viewModel.recognitionResult = "No music detected"
                     }
                 }
             } catch {
+                // Extract user-friendly error message
+                let errorMessage: String
+                if let nsError = error as NSError?,
+                   let userMessage = nsError.userInfo[NSLocalizedDescriptionKey] as? String {
+                    errorMessage = userMessage
+                } else {
+                    errorMessage = "Unable to identify music. \(error.localizedDescription)"
+                }
+                
+                print("❌ Music recognition error: \(errorMessage)")
+                
                 await MainActor.run {
-                    viewModel.recognitionResult = "Unable to identify"
+                    // Keep isRecognizing true to hide button during transition
+                    viewModel.recognitionResult = errorMessage
                 }
             }
             
             await MainActor.run {
-                // Keep isRecognizing true (showing spinner) while we transition
-                // Show result for 2 seconds, then proceed
+                // Keep isRecognizing true (hides button) while we show result for 2 seconds, then proceed
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     store.update(project)
                     onProjectCreated(project)
