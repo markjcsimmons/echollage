@@ -96,6 +96,13 @@ class BackgroundRemover {
         guard let cgImage = image.cgImage else { return nil }
         
         let pixelBuffer = observation.pixelBuffer
+        
+        // Validate mask quality - check if mask has sufficient content (not empty/too small)
+        // This prevents applying masks that would result in a fully transparent image
+        if !isValidMask(pixelBuffer) {
+            print("⚠️ BackgroundRemover: Mask is invalid or too small - rejecting to prevent image deletion")
+            return nil
+        }
         // Use actual pixel dimensions from CGImage, not UIImage.size which may differ
         let pixelWidth = CGFloat(cgImage.width)
         let pixelHeight = CGFloat(cgImage.height)
@@ -252,5 +259,59 @@ class BackgroundRemover {
         }
         
         return normalized
+    }
+    
+    /// Validate that a mask has sufficient content (not empty or too small)
+    /// - Parameter pixelBuffer: The mask pixel buffer from Vision
+    /// - Returns: True if mask is valid and has sufficient content, false otherwise
+    private static func isValidMask(_ pixelBuffer: CVPixelBuffer) -> Bool {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let totalPixels = width * height
+        
+        // Lock buffer to read pixel data
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            print("❌ BackgroundRemover: Failed to get pixel buffer base address")
+            return false
+        }
+        
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        
+        // Vision person segmentation uses kCVPixelFormatType_OneComponent8 (grayscale, 0-255)
+        // White pixels (255) indicate person area, black pixels (0) indicate background
+        guard pixelFormat == kCVPixelFormatType_OneComponent8 else {
+            print("⚠️ BackgroundRemover: Unexpected pixel format: \(pixelFormat)")
+            return false
+        }
+        
+        // Count white pixels (values > 128) to determine mask coverage
+        var whitePixelCount = 0
+        let threshold: UInt8 = 128 // Threshold for considering a pixel as "white" (person area)
+        
+        for y in 0..<height {
+            let rowBase = baseAddress.assumingMemoryBound(to: UInt8.self).advanced(by: y * bytesPerRow)
+            for x in 0..<width {
+                let pixelValue = rowBase[x]
+                if pixelValue > threshold {
+                    whitePixelCount += 1
+                }
+            }
+        }
+        
+        let coverage = Double(whitePixelCount) / Double(totalPixels)
+        let minCoverage = 0.01 // Require at least 1% of pixels to be white (person area)
+        
+        print("🔄 BackgroundRemover: Mask validation - coverage: \(String(format: "%.2f", coverage * 100))%, white pixels: \(whitePixelCount)/\(totalPixels)")
+        
+        if coverage < minCoverage {
+            print("⚠️ BackgroundRemover: Mask coverage too low (\(String(format: "%.2f", coverage * 100))%) - likely no person detected")
+            return false
+        }
+        
+        return true
     }
 }

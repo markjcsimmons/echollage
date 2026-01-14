@@ -535,7 +535,10 @@ struct CollageEditorView: View {
                             showTextEditor = false
                         }
                     )
-                    .transition(.move(edge: .bottom))
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9)),
+                        removal: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9))
+                    ))
                     .zIndex(10000)
                 }
             }
@@ -684,127 +687,7 @@ struct CollageEditorView: View {
                 Color.clear
                 
                 ForEach(sortedImageLayers) { layer in
-                    if let ui = loadImage(fileName: layer.imageFileName),
-                       let idx = layerIndexMap[layer.id] {
-                        let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
-
-                        // Keep same view structure always, just toggle erase mode
-                        let isErasing = selectedTool == .erase && selectedImageId == layer.id
-                        
-                        // Use cached transparency and tight bounds calculations
-                        let hasTransparency = getCachedTransparency(for: layer.imageFileName, image: ui)
-                        let borderSize = selectedImageId == layer.id && !isDrawing && hasTransparency
-                            ? getCachedTightBoundsSize(for: layer.imageFileName, image: ui, baseSize: baseSize)
-                            : baseSize
-                        
-                        ZStack {
-                            // ALWAYS show the ErasableImageView with consistent identity
-                            ErasableImageView(
-                                image: ui,
-                                erasedImageFileName: $project.imageLayers[idx].erasedImageFileName,
-                                brushSize: strokeWidth * 3,
-                                projectId: project.id,
-                                store: store,
-                                isEraseMode: isErasing,
-                                onImageErased: { fileName in
-                                    project.imageLayers[idx].erasedImageFileName = fileName
-                                    store.update(project)
-                                }
-                            )
-                            .frame(width: baseSize.width, height: baseSize.height)
-                            .id("erasable-\(layer.id)") // Stable identity
-                            
-                            // Removed: Image-specific drawing rendering (drawing is now always canvas-wide)
-                            
-                            // Selection border - fit to actual content bounds if image has transparency
-                            // Hide border when actively drawing (canvas-wide drawing)
-                            if selectedImageId == layer.id && !isDrawing {
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.blue, lineWidth: 3)
-                                    .frame(width: borderSize.width, height: borderSize.height)
-                                    .allowsHitTesting(false)
-                            }
-                            
-                            // Gesture overlay (only when NOT erasing and NOT drawing canvas-wide)
-                            if !isErasing && !isDrawing {
-                                Group {
-                                    if selectedTool == .tear {
-                                        // Tear mode: only tap to select, no transform gestures
-                                        Color.clear
-                                            .frame(width: baseSize.width, height: baseSize.height)
-                                            .contentShape(Rectangle())
-                                            .onTapGesture {
-                                                selectedImageId = layer.id
-                                            }
-                                            .zIndex(10)
-                                    } else {
-                                        // Normal mode: transform gestures + tap gestures
-                                        Color.clear
-                                            .frame(width: baseSize.width, height: baseSize.height)
-                                            .contentShape(Rectangle())
-                                            .modifier(TransformModifier(
-                                                transform: $project.imageLayers[idx].transform,
-                                                isEnabled: !isDrawing, // Disable drag/pinch/rotate when drawing
-                                                onGestureEnd: {
-                                                    // Debounce updates - only save after gesture completes
-                                                    // Don't write to disk during drag for smoother performance
-                                                }
-                                            ))
-                                            .simultaneousGesture(
-                                                // Double tap - delete image (reversible with undo)
-                                                TapGesture(count: 2)
-                                                    .onEnded {
-                                                        print("🗑️ Double tap detected - deleting image: \(layer.id)")
-                                                        // Play two clicks for double tap
-                                                        SoundEffectPlayer.shared.playClick()
-                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                                            SoundEffectPlayer.shared.playClick()
-                                                        }
-                                                        // Delay deletion to avoid gesture conflicts
-                                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                                            self.deleteImage(layer: layer)
-                                                        }
-                                                    }
-                                            )
-                                            .simultaneousGesture(
-                                                // Single tap - bring to front and select
-                                                TapGesture(count: 1)
-                                                    .onEnded {
-                                                        print("👆 Single tap detected - bringing to front!")
-                                                        // Play click sound
-                                                        SoundEffectPlayer.shared.playClick()
-                                                        // Single tap brings image to front and selects it
-                                                        bringToFront(layer: layer)
-                                                        // Reset tool state when selecting a new image (no tools active)
-                                                        selectedTool = .pen
-                                                        isDrawing = false
-                                                        // Reset drawing when selecting image
-                                                        isDrawing = false
-                                                        withAnimation(.easeInOut(duration: 0.2)) {
-                                                            selectedImageId = layer.id
-                                                            showToolbarForSelectedImage = true
-                                                        }
-                                                    }
-                                            )
-                                            .simultaneousGesture(
-                                                LongPressGesture(minimumDuration: 0.5)
-                                                    .onEnded { _ in
-                                                        print("⏱️ Long press detected!")
-                                                        sendToBack(layer: layer)
-                                                    }
-                                            )
-                                            .zIndex(10)
-                                    }
-                                }
-                            }
-                        }
-                        .scaleEffect(project.imageLayers[idx].transform.scale)
-                        .rotationEffect(.radians(project.imageLayers[idx].transform.rotation))
-                        .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
-                        .opacity(isDrawing ? 0.6 : 1.0) // Dim images when drawing canvas-wide (helps see paint)
-                        .zIndex(Double(layer.zIndex))
-                        .id("\(layer.id)-\(layer.imageFileName)")
-                    }
+                    imageLayerView(for: layer, canvasSize: canvasSize)
                 }
                 
                 ForEach(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex }), id: \.id) { layer in
@@ -823,7 +706,9 @@ struct CollageEditorView: View {
                     } onTap: {
                         guard !showTextEditor else { return } // Prevent multiple taps
                         SoundEffectPlayer.shared.playClick()
-                        selectedTextId = layer.id
+                        withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                            selectedTextId = layer.id
+                        }
                         editingText = layer.text
                         editingTextColor = Color(hex: layer.hexColor)
                         editingFontSize = layer.fontSize
@@ -833,6 +718,20 @@ struct CollageEditorView: View {
                             self.showTextEditor = true
                         }
                         print("✏️ Showing text editor for: \(layer.id)")
+                    } onDoubleTap: {
+                        // Long press to delete text
+                        guard !showTextEditor else { return }
+                        print("🗑️ Long press detected - deleting text: \(layer.id)")
+                        // Play click sound
+                        SoundEffectPlayer.shared.playClick()
+                        // Haptic feedback for deletion
+                        let generator = UIImpactFeedbackGenerator(style: .medium)
+                        generator.prepare()
+                        generator.impactOccurred(intensity: 0.7)
+                        // Delay deletion to avoid gesture conflicts
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            self.deleteTextLayer(layer: layer)
+                        }
                     } onTextChange: { _ in
                         // Not used in simplified version
                     }
@@ -850,7 +749,20 @@ struct CollageEditorView: View {
                         isInteractive: false
                     )
                     .frame(width: canvasSize.width, height: canvasSize.height)
-                    .allowsHitTesting(false)
+                    .contentShape(Rectangle()) // Make entire area tappable
+                    .onTapGesture(count: 2) {
+                        // Double tap to delete drawing
+                        print("🗑️ Double tap detected - deleting canvas drawing")
+                        // Play two clicks for double tap
+                        SoundEffectPlayer.shared.playClick()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            SoundEffectPlayer.shared.playClick()
+                        }
+                        // Delay deletion to avoid gesture conflicts
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            self.deleteCanvasDrawing()
+                        }
+                    }
                     .zIndex(500) // Above images, below active drawing
                 }
                 
@@ -1144,6 +1056,7 @@ struct CollageEditorView: View {
                 // No scale, no animation - completely static
         }
     }
+    
     
     // MARK: - Pressure Sensitive Erase Overlay
     private struct PressureSensitiveEraseOverlay: UIViewRepresentable {
@@ -1861,6 +1774,137 @@ struct CollageEditorView: View {
         }
     }
 
+    @ViewBuilder
+    private func imageLayerView(for layer: ImageLayer, canvasSize: CGSize) -> some View {
+        if let ui = loadImage(fileName: layer.imageFileName),
+           let idx = layerIndexMap[layer.id] {
+            let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
+            
+            // Keep same view structure always, just toggle erase mode
+            let isErasing = selectedTool == .erase && selectedImageId == layer.id
+            
+            // Use cached transparency and tight bounds calculations
+            let hasTransparency = getCachedTransparency(for: layer.imageFileName, image: ui)
+            
+            ZStack {
+                // ALWAYS show the ErasableImageView with consistent identity
+                ErasableImageView(
+                    image: ui,
+                    erasedImageFileName: $project.imageLayers[idx].erasedImageFileName,
+                    brushSize: strokeWidth * 3,
+                    projectId: project.id,
+                    store: store,
+                    isEraseMode: isErasing,
+                    onImageErased: { fileName in
+                        project.imageLayers[idx].erasedImageFileName = fileName
+                        store.update(project)
+                    }
+                )
+                .frame(width: baseSize.width, height: baseSize.height)
+                .id("erasable-\(layer.id)") // Stable identity
+                
+                // Removed: Image-specific drawing rendering (drawing is now always canvas-wide)
+                
+                // Selection border - always present with fixed frame to prevent layout shifts
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.blue, lineWidth: 3)
+                    .frame(width: baseSize.width, height: baseSize.height) // Always baseSize - never changes
+                    .opacity((selectedImageId == layer.id && !isDrawing) ? 1 : 0) // Hide when not selected or when drawing
+                    .allowsHitTesting(false)
+                
+                // Gesture overlay - always present to maintain consistent layout, but disabled when erasing or drawing
+                if !isErasing {
+                    Group {
+                        if selectedTool == .tear {
+                            // Tear mode: only tap to select, no transform gestures
+                            Color.clear
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    if !isDrawing {
+                                        selectedImageId = layer.id
+                                    }
+                                }
+                                .allowsHitTesting(!isDrawing) // Disable when drawing
+                                .zIndex(10)
+                        } else {
+                            // Normal mode: transform gestures + tap gestures
+                            Color.clear
+                                .frame(width: baseSize.width, height: baseSize.height)
+                                .contentShape(Rectangle())
+                                .modifier(TransformModifier(
+                                    transform: $project.imageLayers[idx].transform,
+                                    isEnabled: !isDrawing, // Disable drag/pinch/rotate when drawing
+                                    onGestureEnd: {
+                                        // Debounce updates - only save after gesture completes
+                                        // Don't write to disk during drag for smoother performance
+                                    }
+                                ))
+                                .simultaneousGesture(
+                                    // Double tap - delete image (reversible with undo)
+                                    TapGesture(count: 2)
+                                        .onEnded {
+                                            if !isDrawing {
+                                                print("🗑️ Double tap detected - deleting image: \(layer.id)")
+                                                // Play two clicks for double tap
+                                                SoundEffectPlayer.shared.playClick()
+                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                                    SoundEffectPlayer.shared.playClick()
+                                                }
+                                                // Delay deletion to avoid gesture conflicts
+                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                    self.deleteImage(layer: layer)
+                                                }
+                                            }
+                                        }
+                                )
+                                .simultaneousGesture(
+                                    // Single tap - bring to front and select
+                                    TapGesture(count: 1)
+                                        .onEnded {
+                                            if !isDrawing {
+                                                print("👆 Single tap detected - bringing to front!")
+                                                // Play click sound
+                                                SoundEffectPlayer.shared.playClick()
+                                                // Single tap brings image to front and selects it
+                                                bringToFront(layer: layer)
+                                                // Reset tool state when selecting a new image (no tools active)
+                                                selectedTool = .pen
+                                                isDrawing = false
+                                                // Reset drawing when selecting image
+                                                isDrawing = false
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    selectedImageId = layer.id
+                                                    showToolbarForSelectedImage = true
+                                                }
+                                            }
+                                        }
+                                )
+                                .simultaneousGesture(
+                                    LongPressGesture(minimumDuration: 0.5)
+                                        .onEnded { _ in
+                                            if !isDrawing {
+                                                print("⏱️ Long press detected!")
+                                                sendToBack(layer: layer)
+                                            }
+                                        }
+                                )
+                                .allowsHitTesting(!isDrawing) // Disable when drawing
+                                .zIndex(10)
+                        }
+                    }
+                }
+            }
+            .frame(width: baseSize.width, height: baseSize.height) // Fixed frame to prevent layout shifts
+            .fixedSize() // Prevent any automatic resizing
+            .scaleEffect(project.imageLayers[idx].transform.scale)
+            .rotationEffect(.radians(project.imageLayers[idx].transform.rotation))
+            .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
+            .zIndex(Double(layer.zIndex))
+            .id("\(layer.id)-\(layer.imageFileName)")
+        }
+    }
+    
     private func baseImageSize(for image: UIImage, canvasSize: CGSize) -> CGSize {
         let aspect = image.size.width / image.size.height
         let maxDimension = min(canvasSize.width, canvasSize.height) * 0.45
@@ -2093,6 +2137,11 @@ struct CollageEditorView: View {
     private func addTextLayer() {
         // Don't play click here - button already plays it
         
+        // Delightful haptic feedback
+        let generator = UIImpactFeedbackGenerator(style: .medium)
+        generator.prepare()
+        generator.impactOccurred(intensity: 0.7)
+        
         // Use "Courier" for classic typewriter style (system font on iOS)
         // Alternative: "American Typewriter" for more stylized look
         let layer = TextLayer(
@@ -2111,7 +2160,9 @@ struct CollageEditorView: View {
         
         // Defer store update to avoid blocking UI
         DispatchQueue.main.async {
-            self.showTextEditor = true
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                self.showTextEditor = true
+            }
         }
         store.update(project)
         print("✏️ Added text layer with typewriter font - showing editor")
@@ -2174,6 +2225,50 @@ struct CollageEditorView: View {
         DispatchQueue.main.async {
             self.store.update(self.project)
         }
+    }
+    
+    private func deleteTextLayer(layer: TextLayer) {
+        guard let idx = project.textLayers.firstIndex(where: { $0.id == layer.id }) else {
+            print("⚠️ Text layer not found for deletion")
+            return
+        }
+        
+        print("🗑️ Deleting text layer at index \(idx)")
+        
+        // Add to undo stack before removing
+        undoStack.append(.deleteText(layer: layer, index: idx))
+        
+        // Remove from project
+        project.textLayers.remove(at: idx)
+        
+        // Clear selection if this was the selected text
+        if selectedTextId == layer.id {
+            selectedTextId = nil
+            showTextEditor = false
+        }
+        
+        store.update(project)
+        print("🗑️ Text layer deleted and added to undo stack")
+    }
+    
+    private func deleteCanvasDrawing() {
+        guard let currentDrawing = project.drawingDataBase64, !currentDrawing.isEmpty else {
+            print("⚠️ No canvas drawing to delete")
+            return
+        }
+        
+        print("🗑️ Deleting canvas drawing")
+        
+        // Add to undo stack before removing
+        undoStack.append(.draw(previousDrawingBase64: currentDrawing))
+        
+        // Clear the drawing
+        project.drawingDataBase64 = nil
+        drawingData = Data()
+        drawingHistory = [Data()]
+        
+        store.update(project)
+        print("🗑️ Canvas drawing deleted and added to undo stack")
     }
     
     private func autoRemoveBackground(for imageId: UUID) {
@@ -2327,31 +2422,10 @@ struct CollageEditorView: View {
         print("🔄 Undo stack size: \(undoStack.count)")
         print("🔄 Undo stack contents: \(undoStack.map { String(describing: $0) })")
         
-        // Process actions in reverse order (most recent first), skipping addImage/deleteImage
-        // Undo should NOT delete or restore images, only other actions like drawing, erasing, masking, etc.
-        var actionToUndo: UndoAction?
-        var tempStack: [UndoAction] = []
-        
-        // Pop actions until we find one that's not addImage or deleteImage
-        while let action = undoStack.popLast() {
-            if case .addImage = action {
-                tempStack.append(action) // Keep skipped actions temporarily
-                print("⚠️ Skipping undo of add image - images can only be deleted by double-tapping")
-            } else if case .deleteImage = action {
-                tempStack.append(action) // Keep skipped actions temporarily
-                print("⚠️ Skipping undo of delete image - images can only be deleted by double-tapping")
-            } else {
-                actionToUndo = action // Found an undoable action
-                // Put skipped actions back in correct order (most recent last)
-                undoStack.append(contentsOf: tempStack.reversed())
-                break
-            }
-        }
-        
-        // If no undoable action found, restore all actions to stack
-        guard let actionToUndo = actionToUndo else {
-            undoStack.append(contentsOf: tempStack.reversed())
-            print("⚠️ No undoable actions found (all were image add/delete actions)")
+        // Process actions in reverse order (most recent first)
+        // Allow undo for all actions including image add/delete
+        guard let actionToUndo = undoStack.popLast() else {
+            print("⚠️ No actions to undo")
             return
         }
         
@@ -2365,11 +2439,35 @@ struct CollageEditorView: View {
                 project.imageLayers.append(original)
                 store.update(project)
                 return
-            case .deleteImage(_, _):
-                // This should never reach here as we filter out deleteImage actions above
-                // Images can only be deleted by double-tapping, not via undo
-                // Undo should NOT restore deleted images
-                print("⚠️ deleteImage action reached switch (should have been filtered)")
+            case let .deleteImage(layer, index):
+                // Restore the deleted image at its original index
+                // Use <= for insert to allow inserting at end (index == count)
+                if index >= 0 && index <= project.imageLayers.count {
+                    project.imageLayers.insert(layer, at: index)
+                } else {
+                    // Invalid index, append instead
+                    project.imageLayers.append(layer)
+                    print("⚠️ Invalid index \(index) for undo, appended instead")
+                }
+                // layerIndexMap is a computed property, so it will automatically rebuild
+                store.update(project)
+                print("🗑️ Restored deleted image")
+                return
+            case let .addImage(layer):
+                // Remove the added image
+                if let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
+                    project.imageLayers.remove(at: idx)
+                    
+                    // Clear selection if this was the selected image
+                    if selectedImageId == layer.id {
+                        selectedImageId = nil
+                        showToolbarForSelectedImage = false
+                    }
+                    
+                    // layerIndexMap is a computed property, so it will automatically rebuild
+                    store.update(project)
+                    print("🗑️ Removed added image via undo")
+                }
                 return
             case let .erase(layerId, previousFileName):
                 // Restore previous erased state (or remove erasure)
@@ -3076,6 +3174,15 @@ extension TransformableImage where Overlay == EmptyView {
     }
 }
 
+// Delightful scale button style for text editor
+private struct ScaleButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
 private struct TextEditorOverlay: View {
     @Binding var text: String
     @Binding var textColor: Color
@@ -3084,156 +3191,171 @@ private struct TextEditorOverlay: View {
     var onCancel: () -> Void
     @FocusState private var isFocused: Bool
     
+    @State private var isPresented = false
+    
     var body: some View {
-        VStack(spacing: 0) {
-            // Semi-transparent backdrop
-            Color.black.opacity(0.4)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    onCancel()
-                }
-            
-            // Input area (like Messages app)
-            VStack(spacing: 0) {
-                // Color picker and size picker
-                HStack(spacing: 20) {
-                    Text("Color:")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                    
-                    Button {
-                        textColor = .black
-                    } label: {
-                        Circle()
-                            .fill(Color.black)
-                            .frame(width: 40, height: 40)
-                            .overlay(
-                                Circle()
-                                    .stroke(textColor == .black ? Color.white : Color.clear, lineWidth: 3)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button {
-                        textColor = .white
-                    } label: {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 40, height: 40)
-                            .overlay(
-                                Circle()
-                                    .stroke(textColor == .white ? Color.black : Color.clear, lineWidth: 3)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Spacer()
-                    
-                    // Size buttons
-                    Text("Size:")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                    
-                    Button {
-                        fontSize = 24
-                    } label: {
-                        Text("S")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundColor(fontSize == 24 ? .black : .white)
-                            .frame(width: 32, height: 32)
-                            .background(fontSize == 24 ? Color.white : Color.clear)
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.white, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button {
-                        fontSize = 32
-                    } label: {
-                        Text("M")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(fontSize == 32 ? .black : .white)
-                            .frame(width: 32, height: 32)
-                            .background(fontSize == 32 ? Color.white : Color.clear)
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.white, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button {
-                        fontSize = 48
-                    } label: {
-                        Text("L")
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundColor(fontSize == 48 ? .black : .white)
-                            .frame(width: 32, height: 32)
-                            .background(fontSize == 48 ? Color.white : Color.clear)
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.white, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Spacer()
-                    
-                    Button("Done") {
-                        onDone()
-                    }
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.white)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Color.gray.opacity(0.9))
-                
-                // Text field
-                HStack(spacing: 12) {
-                    TextField("Type your text", text: $text)
-                        .font(.custom("Courier-Bold", size: 20))
-                        .foregroundColor(.black)
-                        .padding(12)
-                        .background(Color.white)
-                        .cornerRadius(20)
-                        .focused($isFocused)
-                        .submitLabel(.done)
-                        .onSubmit {
-                            onDone()
-                        }
-                        .toolbar {
-                            ToolbarItemGroup(placement: .keyboard) {
-                                Spacer()
-                                Button("Done") {
-                                    onDone()
-                                }
-                                .font(.system(size: 17, weight: .semibold))
-                            }
-                        }
-                    
-                    Button {
-                        onCancel()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 28))
-                            .foregroundColor(.gray)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(Color(white: 0.95))
+        ZStack {
+            backdropView
+            panelView
+        }
+        .onAppear {
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                isPresented = true
             }
         }
         .task {
-            // Use task for better performance
-            try? await Task.sleep(nanoseconds: 50_000_000) // 0.05 seconds
-                isFocused = true
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            isFocused = true
+        }
+    }
+    
+    private var backdropView: some View {
+        Color.black.opacity(isPresented ? 0.3 : 0)
+            .ignoresSafeArea()
+            .animation(.easeOut(duration: 0.2), value: isPresented)
+            .onTapGesture {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isPresented = false
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    onCancel()
+                }
+            }
+    }
+    
+    private var panelView: some View {
+        VStack {
+            Spacer()
+            editorPanel
+        }
+    }
+    
+    private var editorPanel: some View {
+        HStack(spacing: 10) {
+            textFieldView
+                .frame(minWidth: 200) // Give text field more room
+            colorPickerView
+            doneButton
+            cancelButton
+        }
+        .padding(12)
+        .background(panelBackground)
+        .frame(maxWidth: 420)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 30)
+        .scaleEffect(isPresented ? 1.0 : 0.8)
+        .opacity(isPresented ? 1.0 : 0.0)
+        .offset(y: isPresented ? 0 : 20)
+    }
+    
+    private var textFieldView: some View {
+        TextField("Type text", text: $text)
+            .font(.custom("Courier-Bold", size: 16))
+            .foregroundColor(textColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.white)
+            .cornerRadius(8)
+            .focused($isFocused)
+            .submitLabel(.done)
+            .onSubmit {
+                handleSubmit()
+            }
+            .scaleEffect(isFocused ? 1.02 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isFocused)
+    }
+    
+    private var colorPickerView: some View {
+        HStack(spacing: 6) {
+            colorButton(color: .black, isSelected: textColor == .black)
+            colorButton(color: .white, isSelected: textColor == .white)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.black.opacity(0.7))
+        .cornerRadius(16)
+    }
+    
+    private func colorButton(color: Color, isSelected: Bool) -> some View {
+        Button {
+            SoundEffectPlayer.shared.playClick()
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
+                textColor = color
+            }
+        } label: {
+            Circle()
+                .fill(color)
+                .frame(width: 24, height: 24)
+                .overlay(
+                    Circle()
+                        .stroke(isSelected ? (color == .black ? Color.white : Color.black) : Color.clear, lineWidth: 1.5)
+                )
+                .scaleEffect(isSelected ? 1.1 : 1.0)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private var doneButton: some View {
+        Button {
+            handleDone()
+        } label: {
+            Image(systemName: "checkmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 32, height: 32)
+                .background(Color.blue)
+                .clipShape(Circle())
+        }
+        .buttonStyle(ScaleButtonStyle())
+    }
+    
+    private var cancelButton: some View {
+        Button {
+            handleCancel()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 28, height: 28)
+                .background(Color.black.opacity(0.7))
+                .clipShape(Circle())
+        }
+        .buttonStyle(ScaleButtonStyle())
+    }
+    
+    private var panelBackground: some View {
+        RoundedRectangle(cornerRadius: 16)
+            .fill(Color.white.opacity(0.95))
+            .shadow(color: .black.opacity(0.2), radius: 10, x: 0, y: 4)
+    }
+    
+    private func handleSubmit() {
+        SoundEffectPlayer.shared.playClick()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isPresented = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            onDone()
+        }
+    }
+    
+    private func handleDone() {
+        SoundEffectPlayer.shared.playClick()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isPresented = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            onDone()
+        }
+    }
+    
+    private func handleCancel() {
+        SoundEffectPlayer.shared.playClick()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            isPresented = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            onCancel()
         }
     }
 }
@@ -3247,29 +3369,54 @@ private struct TransformableText: View {
     let isSelected: Bool
     var onChange: (Transform2D) -> Void
     var onTap: () -> Void
+    var onDoubleTap: (() -> Void)?
     var onTextChange: (String) -> Void
 
     var body: some View {
-        Text(text)
-            .font(.custom(fontName, size: CGFloat(fontSize)))
-            .foregroundStyle(color)
-            .padding(8)
-            .background(Color.black.opacity(0.3))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(isSelected ? Color.blue : Color.clear, lineWidth: isSelected ? 2 : 0)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 6)) // Only text background is tappable, not transparent areas
-            .scaleEffect(transform.scale)
-            .rotationEffect(.radians(transform.rotation))
-            .offset(x: transform.x, y: transform.y)
-            .modifier(TransformModifier(transform: $transform, isEnabled: true))
-            .onTapGesture(count: 1) {
-                // Single tap to edit
-                        onTap()
-                    }
-            .onChange(of: transform) { onChange($0) }
+        ZStack {
+            // Text content with delightful selection animation
+            Text(text)
+                .font(.custom(fontName, size: CGFloat(fontSize)))
+                .foregroundStyle(color)
+                .padding(8)
+                .background(Color.black.opacity(0.3))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isSelected ? Color.blue : Color.clear, lineWidth: isSelected ? 2 : 0)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
+                )
+                .scaleEffect(isSelected ? 1.02 : 1.0)
+                .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
+            
+            // Gesture overlay - covers entire text area for reliable gesture recognition
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, maxHeight: .infinity) // Fill entire ZStack
+        }
+        .modifier(TransformModifier(transform: $transform, isEnabled: true))
+        .simultaneousGesture(
+            // Long press to delete
+            LongPressGesture(minimumDuration: 0.5)
+                .onEnded { _ in
+                    // Long press to delete
+                    onDoubleTap?()
+                }
+        )
+        .simultaneousGesture(
+            // Single tap to edit
+            TapGesture(count: 1)
+                .onEnded {
+                    // Single tap to edit
+                    onTap()
+                }
+        )
+        .scaleEffect(transform.scale)
+        .rotationEffect(.radians(transform.rotation))
+        .offset(x: transform.x, y: transform.y)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: transform.scale)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: transform.rotation)
+        .onChange(of: transform) { onChange($0) }
     }
 }
 
@@ -3312,9 +3459,22 @@ private struct TransformModifier: ViewModifier {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                // Direct assignment for immediate response, no animation during drag
-                transform.x = value.translation.width + lastOffset.width
-                transform.y = value.translation.height + lastOffset.height
+                // Rotate the translation vector to account for the current rotation
+                // This ensures drag direction matches the visual orientation of the rotated view
+                // We rotate by -rotation to convert from screen space to the view's local coordinate space
+                let rotation = -transform.rotation
+                let cosRotation = cos(rotation)
+                let sinRotation = sin(rotation)
+                
+                // Rotate the translation vector from screen space to view's local space
+                // Rotation matrix for angle -θ: [cos(θ)  sin(θ)]  [x]
+                //                                [-sin(θ) cos(θ)]  [y]
+                let rotatedX = value.translation.width * cosRotation + value.translation.height * sinRotation
+                let rotatedY = -value.translation.width * sinRotation + value.translation.height * cosRotation
+                
+                // Apply the rotated translation
+                transform.x = rotatedX + lastOffset.width
+                transform.y = rotatedY + lastOffset.height
             }
             .onEnded { value in
                 lastOffset = CGSize(width: transform.x, height: transform.y)
@@ -3331,6 +3491,10 @@ private struct TransformModifier: ViewModifier {
             }
             .onEnded { scale in
                 lastScale = transform.scale
+                // Delightful haptic feedback on pinch end
+                let generator = UIImpactFeedbackGenerator(style: .light)
+                generator.prepare()
+                generator.impactOccurred(intensity: 0.5)
                 onGestureEnd?()
             }
     }
@@ -3342,6 +3506,10 @@ private struct TransformModifier: ViewModifier {
             }
             .onEnded { angle in
                 lastRotation = transform.rotation
+                // Delightful haptic feedback on rotation end
+                let generator = UIImpactFeedbackGenerator(style: .light)
+                generator.prepare()
+                generator.impactOccurred(intensity: 0.5)
                 onGestureEnd?()
             }
     }
