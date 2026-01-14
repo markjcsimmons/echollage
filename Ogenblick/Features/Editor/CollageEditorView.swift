@@ -3251,7 +3251,7 @@ private struct TextEditorOverlay: View {
     private var textFieldView: some View {
         TextField("Type text", text: $text)
             .font(.custom("Courier-Bold", size: 16))
-            .foregroundColor(textColor)
+            .foregroundColor(.black) // Always black in editor for visibility
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(Color.white)
