@@ -924,6 +924,13 @@ struct CollageEditorView: View {
                     isDrawing = false
                     print("🎨 Paint deactivated")
                 } else {
+                    // Deselect text and close text editor when activating paint
+                    selectedTextId = nil
+                    showTextEditor = false
+                    // Also deselect any selected image
+                    selectedImageId = nil
+                    showToolbarForSelectedImage = false
+                    
                     // Activate canvas-wide drawing
                     selectedTool = .pen
             isDrawing = true

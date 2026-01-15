@@ -17,10 +17,10 @@ struct ACRCloudService {
         
         print("🎵 ACRCloudService: Starting music recognition")
         
-        // Extract a short sample from the audio (first 10 seconds max, ACRCloud recommends 5-10 seconds)
+        // Extract a short sample from the audio (first 5 seconds, ACRCloud recommends 5-10 seconds)
+        // Reduced to 5 seconds for faster uploads while maintaining recognition accuracy
         // ACRCloud requires WAV/PCM format for reliable fingerprinting
-        // This is more efficient and still provides good recognition accuracy
-        guard let audioSample = try? await extractAudioSampleAsWAV(from: url, maxDuration: 10.0) else {
+        guard let audioSample = try? await extractAudioSampleAsWAV(from: url, maxDuration: 5.0) else {
             print("❌ ACRCloudService: Failed to extract audio sample")
             return nil
         }
@@ -229,8 +229,8 @@ struct ACRCloudService {
         let duration = try await asset.load(.duration)
         let durationSeconds = CMTimeGetSeconds(duration)
         
-        // Determine sample duration (min of maxDuration or actual duration, but at least 1 second, max 10 seconds)
-        let sampleDuration = min(maxDuration, max(1.0, min(durationSeconds, 10.0)))
+        // Determine sample duration (min of maxDuration or actual duration, but at least 1 second, max 5 seconds for faster uploads)
+        let sampleDuration = min(maxDuration, max(1.0, min(durationSeconds, 5.0)))
         let sampleTimeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: sampleDuration, preferredTimescale: 600))
         
         print("🎵 ACRCloudService: Extracting \(sampleDuration)s sample as WAV from \(durationSeconds)s audio")
