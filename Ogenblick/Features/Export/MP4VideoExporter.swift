@@ -258,17 +258,76 @@ class MP4VideoExporter {
             
             // Draw rounded rectangle (lozenge) at bottom
             let hasMusic = musicMetadata != nil
-            // Allow for up to 3 lines of text + app name + padding
-            let lozengeHeight: CGFloat = hasMusic ? 100 : 50
-            let lozengePadding: CGFloat = 20
+            let lozengeOuterPadding: CGFloat = 20
+            let lozengeInnerHorizontalPadding: CGFloat = 30
+            let lozengeInnerVerticalPadding: CGFloat = 12
+            let gapBetweenMusicAndAppName: CGFloat = 4
+            
+            // Keep width full-size; adjust height dynamically based on text.
+            let lozengeWidth = image.size.width - (lozengeOuterPadding * 2)
+            let maxTextWidth = lozengeWidth - (lozengeInnerHorizontalPadding * 2)
+            
+            // Draw rounded rectangle background with semi-transparent black
+            let textStyle = NSMutableParagraphStyle()
+            textStyle.alignment = .center
+            textStyle.lineBreakMode = .byWordWrapping // Enable word wrapping for multi-line text
+            
+            // App name (always shown)
+            let appName = "Échollage"
+            let appNameAttrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: hasMusic ? 12 : 16, weight: .medium),
+                .foregroundColor: UIColor.white.withAlphaComponent(hasMusic ? 0.8 : 1.0),
+                .paragraphStyle: textStyle
+            ]
+            let appNameTextSize = appName.size(withAttributes: appNameAttrs)
+
+            // Music info (title and artist) - only if present
+            let fontSize: CGFloat = 14 // Slightly smaller to fit 3 lines better
+            let musicFont = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+            let musicAttrs: [NSAttributedString.Key: Any] = [
+                .font: musicFont,
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: textStyle
+            ]
+
+            var musicText: String? = nil
+            var musicTextHeight: CGFloat = 0
+            if let music = musicMetadata {
+                let combined = "\(music.title) • \(music.artist)"
+                musicText = combined
+                
+                let constraintSize = CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude)
+                let boundingRect = (combined as NSString).boundingRect(
+                    with: constraintSize,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: musicAttrs,
+                    context: nil
+                )
+                
+                // Cap at 3 lines
+                let maxHeightFor3Lines = musicFont.lineHeight * 3
+                musicTextHeight = min(boundingRect.height, maxHeightFor3Lines)
+            }
+            
+            let contentHeight: CGFloat = {
+                if musicText != nil {
+                    return musicTextHeight + gapBetweenMusicAndAppName + appNameTextSize.height
+                } else {
+                    return appNameTextSize.height
+                }
+            }()
+            
+            let computedLozengeHeight = contentHeight + (lozengeInnerVerticalPadding * 2)
+            let minLozengeHeight: CGFloat = hasMusic ? 64 : 50
+            let lozengeHeight = max(minLozengeHeight, computedLozengeHeight)
+            
             let lozengeRect = CGRect(
-                x: lozengePadding,
-                y: image.size.height - lozengeHeight - lozengePadding,
-                width: image.size.width - (lozengePadding * 2),
+                x: lozengeOuterPadding,
+                y: image.size.height - lozengeHeight - lozengeOuterPadding,
+                width: lozengeWidth,
                 height: lozengeHeight
             )
             
-            // Draw rounded rectangle background with semi-transparent black
             let lozengePath = UIBezierPath(
                 roundedRect: lozengeRect,
                 cornerRadius: lozengeHeight / 2
@@ -278,45 +337,13 @@ class MP4VideoExporter {
             context.cgContext.fillPath()
             
             // Draw text
-            let textStyle = NSMutableParagraphStyle()
-            textStyle.alignment = .center
-            textStyle.lineBreakMode = .byWordWrapping // Enable word wrapping for multi-line text
-            
-            // Music info (title and artist) - only if present
-            if let music = musicMetadata {
-                let musicText = "\(music.title) • \(music.artist)"
-                let horizontalPadding: CGFloat = 30 // More space on each side
-                let verticalPadding: CGFloat = 12 // Slightly reduced for better fit
-                let maxWidth = lozengeRect.width - (horizontalPadding * 2)
-                
-                // Use font that allows multi-line wrapping
-                let fontSize: CGFloat = 14 // Slightly smaller to fit 3 lines better
-                let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
-                
-                var musicAttrs: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: UIColor.white,
-                    .paragraphStyle: textStyle
-                ]
-                
-                // Calculate the bounding rect for the text to see how many lines it needs
-                let constraintSize = CGSize(width: maxWidth, height: .greatestFiniteMagnitude)
-                let boundingRect = (musicText as NSString).boundingRect(
-                    with: constraintSize,
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: musicAttrs,
-                    context: nil
-                )
-                
-                // Use the calculated height, but cap at 3 lines worth of height
-                let lineHeight = font.lineHeight
-                let maxHeightFor3Lines = lineHeight * 3
-                let textHeight = min(boundingRect.height, maxHeightFor3Lines)
-                
-                // Draw text with multi-line wrapping (no truncation)
+            if let musicText {
+                let maxWidth = maxTextWidth
+                let textHeight = musicTextHeight
+                let topY = lozengeRect.minY + lozengeInnerVerticalPadding
                 let musicTextRect = CGRect(
-                    x: lozengeRect.minX + horizontalPadding,
-                    y: lozengeRect.minY + verticalPadding,
+                    x: lozengeRect.minX + lozengeInnerHorizontalPadding,
+                    y: topY,
                     width: maxWidth,
                     height: textHeight
                 )
@@ -328,24 +355,24 @@ class MP4VideoExporter {
                     attributes: musicAttrs,
                     context: nil
                 )
+                
+                let appNameTextRect = CGRect(
+                    x: lozengeRect.minX + lozengeInnerHorizontalPadding,
+                    y: musicTextRect.maxY + gapBetweenMusicAndAppName,
+                    width: lozengeRect.width - (lozengeInnerHorizontalPadding * 2),
+                    height: appNameTextSize.height
+                )
+                appName.draw(in: appNameTextRect, withAttributes: appNameAttrs)
+            } else {
+                // No music: center app name in the pill.
+                let appNameTextRect = CGRect(
+                    x: lozengeRect.minX + lozengeInnerHorizontalPadding,
+                    y: lozengeRect.midY - appNameTextSize.height / 2,
+                    width: lozengeRect.width - (lozengeInnerHorizontalPadding * 2),
+                    height: appNameTextSize.height
+                )
+                appName.draw(in: appNameTextRect, withAttributes: appNameAttrs)
             }
-            
-            // App name (always shown)
-            let appName = "Échollage"
-            let horizontalPadding: CGFloat = 30 // Match music text padding
-            let appNameAttrs: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: hasMusic ? 12 : 16, weight: .medium),
-                .foregroundColor: UIColor.white.withAlphaComponent(hasMusic ? 0.8 : 1.0),
-                .paragraphStyle: textStyle
-            ]
-            let appNameTextSize = appName.size(withAttributes: appNameAttrs)
-            let appNameTextRect = CGRect(
-                x: lozengeRect.minX + horizontalPadding,
-                y: hasMusic ? (lozengeRect.maxY - appNameTextSize.height - 15) : (lozengeRect.midY - appNameTextSize.height / 2),
-                width: lozengeRect.width - (horizontalPadding * 2),
-                height: appNameTextSize.height
-            )
-            appName.draw(in: appNameTextRect, withAttributes: appNameAttrs)
         }
     }
 }

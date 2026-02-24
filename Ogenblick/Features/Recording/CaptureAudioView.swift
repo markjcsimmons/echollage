@@ -10,6 +10,8 @@ struct CaptureAudioView: View {
     @StateObject private var previewPlayer = AudioPlayer()
     @StateObject private var viewModel = CaptureAudioViewModel()
     
+    private static let noMusicRecognitionMessage = "Audio captured (but no music recognized)"
+    
     var body: some View {
         ZStack {
             // Background and content layer
@@ -75,12 +77,27 @@ struct CaptureAudioView: View {
             if viewModel.recordingState == .recording {
                 waveform
             } else if let result = viewModel.recognitionResult {
-                Text(result)
-                    .font(.title3)
-                    .fontWeight(.medium)
-                    .foregroundStyle(result.contains("✓") ? Color.green : Color.white.opacity(0.8))
+                if result == Self.noMusicRecognitionMessage {
+                    VStack(spacing: 4) {
+                        Text("Audio captured")
+                            .font(.title3)
+                            .fontWeight(.medium)
+                            .foregroundStyle(Color.white.opacity(0.9))
+                        
+                        Text("(but no music recognized)")
+                            .font(.footnote)
+                            .foregroundStyle(Color.white.opacity(0.75))
+                    }
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 12)
+                } else {
+                    Text(result)
+                        .font(.title3)
+                        .fontWeight(.medium)
+                        .foregroundStyle(result.contains("✓") ? Color.green : Color.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 12)
+                }
             } else {
                 EmptyView()
             }
@@ -221,9 +238,9 @@ struct CaptureAudioView: View {
             // Only update state if recording actually started
         project.audioFileName = fileName
         viewModel.recordingState = .recording
-        viewModel.timeRemaining = 15
+        viewModel.timeRemaining = CaptureAudioViewModel.maxRecordingSeconds
         viewModel.startTimer()
-            print("✅ State updated: recording, time=15")
+            print("✅ State updated: recording, time=\(CaptureAudioViewModel.maxRecordingSeconds)")
         } catch let error as NSError {
             print("❌ Failed to start recording: \(error)")
             print("❌ Error domain: \(error.domain), code: \(error.code)")
@@ -324,7 +341,7 @@ struct CaptureAudioView: View {
                     }
                 } else {
                     await MainActor.run {
-                        viewModel.recognitionResult = "No music detected"
+                        viewModel.recognitionResult = "Audio captured (but no music recognized)"
                         viewModel.isRecognizing = false
                     }
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -334,7 +351,8 @@ struct CaptureAudioView: View {
                 }
             } catch {
                 await MainActor.run {
-                    viewModel.recognitionResult = "Recognition failed"
+                    // For UX: treat recognition errors the same as "no match"
+                    viewModel.recognitionResult = Self.noMusicRecognitionMessage
                     viewModel.isRecognizing = false
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)

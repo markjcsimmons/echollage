@@ -25,21 +25,39 @@ struct PhotoPicker: UIViewControllerRepresentable {
 
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
             picker.dismiss(animated: true)
+            // Always call back (even when user cancels) so the caller can
+            // clear its `.sheet(isPresented:)` binding reliably.
             
-            guard !results.isEmpty else { return }
-            var images: [UIImage] = []
-            let group = DispatchGroup()
-            for result in results {
-                if result.itemProvider.canLoadObject(ofClass: UIImage.self) {
-                    group.enter()
-                    result.itemProvider.loadObject(ofClass: UIImage.self) { object, _ in
-                        if let image = object as? UIImage { images.append(image) }
-                        group.leave()
+            // Collecting results via callbacks and mutating a shared array can race.
+            // Use a task group to load images concurrently and aggregate safely.
+            Task {
+                let images: [UIImage] = await withTaskGroup(of: UIImage?.self) { group in
+                    for result in results {
+                        group.addTask {
+                            await Self.loadUIImage(from: result.itemProvider)
+                        }
                     }
+                    
+                    var loaded: [UIImage] = []
+                    for await img in group {
+                        if let img { loaded.append(img) }
+                    }
+                    return loaded
+                }
+                
+                await MainActor.run {
+                    self.onImagesPicked(images)
                 }
             }
-            group.notify(queue: .main) {
-                self.onImagesPicked(images)
+        }
+        
+        private static func loadUIImage(from provider: NSItemProvider) async -> UIImage? {
+            guard provider.canLoadObject(ofClass: UIImage.self) else { return nil }
+            
+            return await withCheckedContinuation { continuation in
+                provider.loadObject(ofClass: UIImage.self) { object, _ in
+                    continuation.resume(returning: object as? UIImage)
+                }
             }
         }
     }

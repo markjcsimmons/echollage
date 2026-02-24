@@ -34,12 +34,12 @@ struct MaskEditorView: UIViewRepresentable {
 final class MaskCanvasView: UIView {
     var baseImageSize: CGSize = .zero
     var brushSize: CGFloat = 16
-    var projectId: UUID!
-    var store: ProjectStore!
+    var projectId: UUID?
+    var store: ProjectStore?
     var maskFileName: String?
     var onSaved: ((String) -> Void)?
 
-    private var maskImage: UIImage! // grayscale
+    private var maskImage: UIImage? // grayscale
     private var points: [CGPoint] = []
 
     override init(frame: CGRect) {
@@ -51,6 +51,13 @@ final class MaskCanvasView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
 
     func loadMaskOrCreate() {
+        guard let store, let projectId else {
+            // View can receive touches before configuration; fail safely.
+            maskImage = nil
+            setNeedsDisplay()
+            return
+        }
+        
         if let name = maskFileName {
             let url = store.urlForProjectAsset(projectId: projectId, fileName: name)
             if let img = UIImage(contentsOfFile: url.path) {
@@ -102,16 +109,17 @@ final class MaskCanvasView: UIView {
             print("⚠️ Not enough points: \(points.count)")
             return
         }
-        guard maskImage.size.width > 0 && maskImage.size.height > 0 else {
+        guard let currentMask = maskImage, currentMask.size.width > 0 && currentMask.size.height > 0 else {
             print("❌ Mask image has zero size")
             return
         }
+        guard let store, let projectId else { return }
         let displayed = aspectFitRect(imageSize: baseImageSize, in: bounds.size)
-        print("🎨 Displayed rect: \(displayed), mask size: \(maskImage.size)")
+        print("🎨 Displayed rect: \(displayed), mask size: \(currentMask.size)")
 
         // Convert points to mask space
-        let scaleX = maskImage.size.width / displayed.width
-        let scaleY = maskImage.size.height / displayed.height
+        let scaleX = currentMask.size.width / displayed.width
+        let scaleY = currentMask.size.height / displayed.height
         let maskPoints: [CGPoint] = points.compactMap { p in
             guard displayed.contains(p) else { return nil }
             let rel = CGPoint(x: (p.x - displayed.minX) * scaleX, y: (p.y - displayed.minY) * scaleY)
@@ -122,9 +130,9 @@ final class MaskCanvasView: UIView {
         // Render once per stroke
         let fmt = UIGraphicsImageRendererFormat.default()
         fmt.scale = 1
-        let renderer = UIGraphicsImageRenderer(size: maskImage.size, format: fmt)
+        let renderer = UIGraphicsImageRenderer(size: currentMask.size, format: fmt)
         let newMask = renderer.image { ctx in
-            maskImage.draw(at: .zero)
+            currentMask.draw(at: .zero)
             let cg = ctx.cgContext
             cg.setBlendMode(.normal)
             cg.setStrokeColor(UIColor.black.cgColor) // black = erase
@@ -138,7 +146,7 @@ final class MaskCanvasView: UIView {
             cg.strokePath()
         }
 
-        maskImage = newMask
+        self.maskImage = newMask
 
         // Save
         if let data = newMask.pngData() {

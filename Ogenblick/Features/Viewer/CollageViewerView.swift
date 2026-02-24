@@ -5,16 +5,23 @@ struct CollageViewerView: View {
     let assetURLProvider: (String) -> URL?
     @Environment(\.dismiss) private var dismiss
     
+    @State private var renderedImage: UIImage? = nil
+    @State private var isRendering: Bool = true
+    
     var body: some View {
         ZStack {
             // Background
             Color.black.ignoresSafeArea()
             
             // Rendered collage
-            if let image = CollageRenderer.render(project: project, assetURLProvider: assetURLProvider) {
+            if let image = renderedImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
+                    .transition(.opacity)
+            } else if isRendering {
+                ProgressView()
+                    .tint(.white)
             } else {
                 Text("Failed to render collage")
                     .foregroundColor(.white)
@@ -36,6 +43,24 @@ struct CollageViewerView: View {
                     .padding()
                 }
                 Spacer()
+            }
+        }
+        .task {
+            // Render off-main to avoid UI freezes.
+            isRendering = true
+            let size = UIScreen.main.bounds.size
+            let scale = UIScreen.main.scale
+            let image = await CollageRenderer.renderAsync(
+                project: project,
+                assetURLProvider: assetURLProvider,
+                canvasSize: size,
+                screenScale: scale
+            )
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.renderedImage = image
+                    self.isRendering = false
+                }
             }
         }
     }

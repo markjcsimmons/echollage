@@ -10,6 +10,9 @@ struct OgenblickApp: App {
             NavigationStack {
                 MainFlowView()
             }
+            .onAppear {
+                Logger.info("App WindowGroup appeared", category: .general)
+            }
             .environmentObject(projectStore)
             .environmentObject(purchaseManager)
         }

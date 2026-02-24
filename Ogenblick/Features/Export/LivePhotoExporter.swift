@@ -186,43 +186,53 @@ class LivePhotoExporter {
             throw ExportError.audioNotFound
         }
         
+        let audioQueue = DispatchQueue(label: "audioQueue")
         await withCheckedContinuation { continuation in
-            audioInput.requestMediaDataWhenReady(on: DispatchQueue(label: "audioQueue")) {
-                let reader: AVAssetReader
-                do {
-                    reader = try AVAssetReader(asset: audioAsset)
-                } catch {
-                    audioInput.markAsFinished()
-                    continuation.resume()
-                    return
-                }
+            var didFinish = false
+            
+            let reader: AVAssetReader
+            do {
+                reader = try AVAssetReader(asset: audioAsset)
+            } catch {
+                didFinish = true
+                audioInput.markAsFinished()
+                continuation.resume()
+                return
+            }
+            
+            let readerOutput = AVAssetReaderTrackOutput(
+                track: audioTrack,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatLinearPCM,
+                    AVLinearPCMBitDepthKey: 16,
+                    AVLinearPCMIsBigEndianKey: false,
+                    AVLinearPCMIsFloatKey: false,
+                    AVLinearPCMIsNonInterleaved: false
+                ]
+            )
+            reader.add(readerOutput)
+            
+            guard reader.startReading() else {
+                didFinish = true
+                audioInput.markAsFinished()
+                continuation.resume()
+                return
+            }
+            
+            audioInput.requestMediaDataWhenReady(on: audioQueue) {
+                if didFinish { return }
                 
-                let readerOutput = AVAssetReaderTrackOutput(
-                    track: audioTrack,
-                    outputSettings: [
-                        AVFormatIDKey: kAudioFormatLinearPCM,
-                        AVLinearPCMBitDepthKey: 16,
-                        AVLinearPCMIsBigEndianKey: false,
-                        AVLinearPCMIsFloatKey: false,
-                        AVLinearPCMIsNonInterleaved: false
-                    ]
-                )
-                reader.add(readerOutput)
-                reader.startReading()
-                
-                var shouldStop = false
-                while audioInput.isReadyForMoreMediaData && !shouldStop {
+                while audioInput.isReadyForMoreMediaData && !didFinish {
                     autoreleasepool {
                         if let sampleBuffer = readerOutput.copyNextSampleBuffer() {
-                            audioInput.append(sampleBuffer)
+                            _ = audioInput.append(sampleBuffer)
                         } else {
-                            shouldStop = true
+                            didFinish = true
+                            audioInput.markAsFinished()
+                            continuation.resume()
                         }
                     }
                 }
-                
-                audioInput.markAsFinished()
-                continuation.resume()
             }
         }
         

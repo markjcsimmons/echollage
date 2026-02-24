@@ -9,8 +9,20 @@ import PencilKit
 enum CollageRenderer {
     /// Renders the collage at full screen dimensions (canvas fills entire screen in editor)
     static func render(project: Project, assetURLProvider: (String) -> URL?) -> UIImage? {
-        // Canvas fills entire screen in editor (toolbar is overlaid on top)
+        // Backwards-compatible wrapper (kept for call sites that don't have geometry).
+        // Note: UIScreen access is best kept on main thread.
         let size = UIScreen.main.bounds.size
+        let screenScale = UIScreen.main.scale
+        return render(project: project, assetURLProvider: assetURLProvider, canvasSize: size, screenScale: screenScale)
+    }
+    
+    /// Render with explicit size/scale (safe to run off-main).
+    static func render(
+        project: Project,
+        assetURLProvider: (String) -> URL?,
+        canvasSize size: CGSize,
+        screenScale: CGFloat
+    ) -> UIImage? {
         let scale: CGFloat = 1.0
         
         print("🎨 Rendering at full screen: \(size), project canvas: \(project.canvasWidth)x\(project.canvasHeight)")
@@ -250,9 +262,29 @@ enum CollageRenderer {
                let drawingData = Data(base64Encoded: drawingBase64),
                let drawing = try? PKDrawing(data: drawingData) {
                 // Render the drawing at screen size (same as the canvas view in editor)
-                let drawingImage = drawing.image(from: CGRect(origin: .zero, size: size), scale: UIScreen.main.scale)
+                let drawingImage = drawing.image(from: CGRect(origin: .zero, size: size), scale: screenScale)
                 drawingImage.draw(in: CGRect(origin: .zero, size: size))
                 print("🎨 Drew global canvas drawing at size: \(size)")
+            }
+        }
+    }
+    
+    /// Render off-main to avoid UI hangs (export/viewer).
+    static func renderAsync(
+        project: Project,
+        assetURLProvider: @escaping (String) -> URL?,
+        canvasSize: CGSize,
+        screenScale: CGFloat
+    ) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let image = render(
+                    project: project,
+                    assetURLProvider: assetURLProvider,
+                    canvasSize: canvasSize,
+                    screenScale: screenScale
+                )
+                continuation.resume(returning: image)
             }
         }
     }

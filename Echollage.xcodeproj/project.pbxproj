@@ -51,6 +51,7 @@
 		8B2BEE55CDCAB4CE6D6BE038 /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3757FC86DFEBF6DFB9D0B3A8 /* Secrets.plist */; };
 		9162B2663D4ADA99B7622646 /* ShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBFF8EF4CF597C97052DFC4 /* ShareSheet.swift */; };
 		957EB11B31CF480A72B81BA4 /* CollageEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9505A9953D4589BEBC71CE75 /* CollageEditorView.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* EditorCoachMarksOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60718293A4B5D /* EditorCoachMarksOverlay.swift */; };
 		96641CA441C1B207A37BE1B8 /* ImageBoundDrawingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACC0D0D25166CB7BF703EB22 /* ImageBoundDrawingView.swift */; };
 		9BEC3FB993A7B95B83DD285E /* CaptureAudioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1F867B89747359A0FA3C6B /* CaptureAudioView.swift */; };
 		A294D41078F6F88587F4A7A5 /* PencilKitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3F63A2D1B30E85D20B256D8 /* PencilKitView.swift */; };
@@ -71,6 +72,7 @@
 		17A34E595BCB94601A22C1F7 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
 		1801533BA988E0E81695CD12 /* LayerPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LayerPanel.swift; sourceTree = "<group>"; };
 		CE85D553394746F885F43E8A /* BackgroundRemover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRemover.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F60718293A4B5D /* EditorCoachMarksOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorCoachMarksOverlay.swift; sourceTree = "<group>"; };
 		1F1A59EF2A2D38AF3720D473 /* ProjectStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectStore.swift; sourceTree = "<group>"; };
 		2190E4E24AB8A26D600D20DC /* CollageRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollageRenderer.swift; sourceTree = "<group>"; };
 		24EEB9E710842848590C0451 /* CaptureAudioViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureAudioViewModel.swift; sourceTree = "<group>"; };
@@ -143,6 +145,7 @@
 			children = (
 				CE85D553394746F885F43E8A /* BackgroundRemover.swift */,
 				9505A9953D4589BEBC71CE75 /* CollageEditorView.swift */,
+				A1B2C3D4E5F60718293A4B5D /* EditorCoachMarksOverlay.swift */,
 				EAA6B83972BE8FF73B2FB6E7 /* DrawingToolbar.swift */,
 				5033C9CFCC2B08E03D7A9098 /* ErasableImageView.swift */,
 				42BB493BF4F5BE45B9D7D03A /* ImageSplitter.swift */,
@@ -472,6 +475,7 @@
 				9BEC3FB993A7B95B83DD285E /* CaptureAudioView.swift in Sources */,
 				E0B0684416B51C8162A753A4 /* CaptureAudioViewModel.swift in Sources */,
 				957EB11B31CF480A72B81BA4 /* CollageEditorView.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* EditorCoachMarksOverlay.swift in Sources */,
 				101C984CF439444E5C6F49A4 /* CollageRenderer.swift in Sources */,
 				B8FAF56D63782D4527000D66 /* CollageViewerView.swift in Sources */,
 				0A49C1B7DD707C5CA11D467A /* DrawingToolbar.swift in Sources */,

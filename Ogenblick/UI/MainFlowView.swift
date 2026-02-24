@@ -51,6 +51,7 @@ struct MainFlowView: View {
             }
         }
         .onAppear {
+            Logger.info("MainFlowView onAppear (hasSeenIntro=\(hasSeenIntro))", category: .general)
             print("🎬 MainFlowView onAppear - hasSeenIntro: \(hasSeenIntro)")
             // Show intro on first launch - check immediately
             if !hasSeenIntro {
@@ -128,6 +129,10 @@ struct InitialCaptureView: View {
     @State private var isStoppingRecording = false
     @State private var earlyRecognitionTask: Task<Void, Never>?
     @State private var earlyRecognitionFoundMusic = false // Track if early recognition found music
+    @State private var saveAndContinueTask: Task<Void, Never>?
+    @State private var recognitionSessionNonce: Int = 0
+    
+    private static let noMusicRecognitionMessage = "Audio captured (but no music recognized)"
     
     var body: some View {
         ZStack {
@@ -175,12 +180,28 @@ struct InitialCaptureView: View {
                                     .font(.system(size: 40))
                                     .foregroundStyle(.white.opacity(0.9))
                                 
-                                Text(result)
-                                    .font(.title2)
-                                    .fontWeight(.medium)
-                                    .foregroundStyle(.white)
+                                if result == Self.noMusicRecognitionMessage {
+                                    VStack(spacing: 6) {
+                                        Text("Audio captured")
+                                            .font(.title2)
+                                            .fontWeight(.medium)
+                                            .foregroundStyle(.white)
+                                        
+                                        Text("(but no music recognized)")
+                                            .font(.subheadline)
+                                            .fontWeight(.regular)
+                                            .foregroundStyle(.white.opacity(0.85))
+                                    }
                                     .multilineTextAlignment(.center)
                                     .padding(.horizontal, 40)
+                                } else {
+                                    Text(result)
+                                        .font(.title2)
+                                        .fontWeight(.medium)
+                                        .foregroundStyle(.white)
+                                        .multilineTextAlignment(.center)
+                                        .padding(.horizontal, 40)
+                                }
                             }
                             .transition(.opacity.combined(with: .scale))
                         }
@@ -286,6 +307,9 @@ struct InitialCaptureView: View {
                 stopRecording()
             }
         }
+        .onAppear {
+            Logger.info("InitialCaptureView appeared", category: .recording)
+        }
     }
     
     private var buttonGradient: LinearGradient {
@@ -333,9 +357,12 @@ struct InitialCaptureView: View {
     }
     
     private func startRecording() {
+        recognitionSessionNonce += 1
+        let session = recognitionSessionNonce
+        
         // Update UI immediately for instant feedback
         viewModel.recordingState = .recording
-        viewModel.timeRemaining = 15
+        viewModel.timeRemaining = CaptureAudioViewModel.maxRecordingSeconds
         viewModel.startTimer()
         
         // Reset early recognition flag
@@ -360,7 +387,7 @@ struct InitialCaptureView: View {
             }
             
             // Start early recognition after 5 seconds of recording
-            await startEarlyRecognition(audioURL: url)
+            await startEarlyRecognition(audioURL: url, session: session)
         } catch {
                 print("❌ Failed to start recording: \(error)")
                 // Reset UI state on failure
@@ -382,6 +409,8 @@ struct InitialCaptureView: View {
             return
         }
         
+        let session = recognitionSessionNonce
+        
         // Cancel early recognition task if still running
         earlyRecognitionTask?.cancel()
         earlyRecognitionTask = nil
@@ -389,9 +418,9 @@ struct InitialCaptureView: View {
         // Set flag to prevent multiple calls
         isStoppingRecording = true
         
-        // Calculate duration from timer BEFORE stopping (15 seconds - timeRemaining)
-        let timerDuration = 15.0 - Double(viewModel.timeRemaining)
-        print("🎤 Timer-based duration: \(timerDuration)s (15 - \(viewModel.timeRemaining))")
+        // Calculate duration from timer BEFORE stopping (max seconds - timeRemaining)
+        let timerDuration = Double(CaptureAudioViewModel.maxRecordingSeconds) - Double(viewModel.timeRemaining)
+        print("🎤 Timer-based duration: \(timerDuration)s (\(CaptureAudioViewModel.maxRecordingSeconds) - \(viewModel.timeRemaining))")
         
         Task {
             // Stop the recorder (it will try to capture duration from currentTime)
@@ -409,6 +438,10 @@ struct InitialCaptureView: View {
             print("🎤 Final duration to save: \(duration)s")
             
             await MainActor.run {
+                guard recognitionSessionNonce == session else {
+                    isStoppingRecording = false
+                    return
+                }
                 viewModel.stopTimer()
                 viewModel.recordingState = .finished
                 
@@ -439,7 +472,7 @@ struct InitialCaptureView: View {
         }
     }
     
-    private func startEarlyRecognition(audioURL: URL) async {
+    private func startEarlyRecognition(audioURL: URL, session: Int) async {
         // Wait 5 seconds to ensure we have enough audio
         try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
         
@@ -448,6 +481,7 @@ struct InitialCaptureView: View {
             print("🎵 Early recognition cancelled - recording stopped")
             return
         }
+        guard recognitionSessionNonce == session else { return }
         
         print("🎵 Starting early recognition while recording continues...")
         
@@ -457,6 +491,7 @@ struct InitialCaptureView: View {
                 // Try to recognize music from the partially recorded file
                 if let metadata = try await ACRCloudService.recognizeMusic(fromAudioAt: audioURL) {
                     await MainActor.run {
+                        guard recognitionSessionNonce == session else { return }
                         guard var project = tempProject else { return }
                         project.musicMetadata = metadata
                         store.update(project)
@@ -467,6 +502,7 @@ struct InitialCaptureView: View {
                     }
                 } else {
                     await MainActor.run {
+                        guard recognitionSessionNonce == session else { return }
                         earlyRecognitionFoundMusic = false
                     }
                     print("🎵 Early recognition: No music detected (silent)")
@@ -479,9 +515,13 @@ struct InitialCaptureView: View {
     }
     
     private func startAgain() {
+        recognitionSessionNonce += 1
+        
         // Cancel early recognition if it's running
         earlyRecognitionTask?.cancel()
         earlyRecognitionTask = nil
+        saveAndContinueTask?.cancel()
+        saveAndContinueTask = nil
         
         // Reset early recognition flag
         earlyRecognitionFoundMusic = false
@@ -527,13 +567,18 @@ struct InitialCaptureView: View {
         // If early recognition found no music, continue trying for up to 3 seconds with the complete file
         // isRecognizing is already set to true in handleMainButtonTap() before calling this function
         
-        Task {
+        let session = recognitionSessionNonce
+        saveAndContinueTask?.cancel()
+        saveAndContinueTask = Task {
             // Add minimum delay to ensure file is fully finalized
             try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 second minimum delay
+            guard !Task.isCancelled else { return }
+            guard recognitionSessionNonce == session else { return }
             // Verify file exists and is readable
             guard FileManager.default.fileExists(atPath: audioURL.path) else {
                 print("❌ Audio file does not exist after recording")
                 await MainActor.run {
+                    guard recognitionSessionNonce == session else { return }
                     viewModel.isRecognizing = false
                     viewModel.recognitionResult = "Recording failed"
                 }
@@ -547,6 +592,7 @@ struct InitialCaptureView: View {
             guard fileSize > 1000 else {
                 print("❌ Audio file too small (\(fileSize) bytes) - likely corrupt")
                 await MainActor.run {
+                    guard recognitionSessionNonce == session else { return }
                     viewModel.isRecognizing = false
                     viewModel.recognitionResult = "Recording failed"
                 }
@@ -558,6 +604,7 @@ struct InitialCaptureView: View {
             guard let duration = project.audioDuration, duration > 0 else {
                 print("❌ Audio duration not available in project")
                 await MainActor.run {
+                    guard recognitionSessionNonce == session else { return }
                     viewModel.isRecognizing = false
                     viewModel.recognitionResult = "Recording failed"
                 }
@@ -567,10 +614,20 @@ struct InitialCaptureView: View {
             print("✅ Using audio duration from project: \(duration)s")
             
             do {
-                // Try recognition - if early recognition found no music, this gives us another chance with the full file
-                if let metadata = try await ACRCloudService.recognizeMusic(fromAudioAt: audioURL) {
+                func recognizeWithOneTimeoutRetry() async throws -> MusicMetadata? {
+                    do {
+                        return try await ACRCloudService.recognizeMusic(fromAudioAt: audioURL)
+                    } catch let urlError as URLError where urlError.code == .timedOut {
+                        print("⏱️ Music recognition timed out — retrying once...")
+                        return try await ACRCloudService.recognizeMusic(fromAudioAt: audioURL)
+                    }
+                }
+                
+                // Try recognition - if early recognition found no music, this gives us another chance with the full file.
+                if let metadata = try await recognizeWithOneTimeoutRetry() {
                     // Music found - show immediately
                     await MainActor.run {
+                        guard recognitionSessionNonce == session else { return }
                         project.musicMetadata = metadata
                         store.update(project)
                         viewModel.recognitionResult = "\(metadata.title)\n\(metadata.artist)"
@@ -579,39 +636,37 @@ struct InitialCaptureView: View {
                     // Wait a moment to show the result, then continue
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await MainActor.run {
+                        guard recognitionSessionNonce == session else { return }
                         onProjectCreated(project)
                     }
                 } else {
                     // No music detected
                     await MainActor.run {
-                        viewModel.recognitionResult = "No music detected"
+                        guard recognitionSessionNonce == session else { return }
+                        viewModel.recognitionResult = "Audio captured (but no music recognized)"
                         viewModel.isRecognizing = false
                     }
                     // Wait a moment to show the result, then continue
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await MainActor.run {
+                        guard recognitionSessionNonce == session else { return }
                         onProjectCreated(project)
                     }
                 }
             } catch {
-                // Extract user-friendly error message
-                let errorMessage: String
-                if let nsError = error as NSError?,
-                   let userMessage = nsError.userInfo[NSLocalizedDescriptionKey] as? String {
-                    errorMessage = userMessage
-                } else {
-                    errorMessage = "Unable to identify music. \(error.localizedDescription)"
-                }
-                
-                print("❌ Music recognition error: \(errorMessage)")
+                // For UX: treat recognition errors the same as "no match"
+                // (audio was still captured successfully).
+                print("❌ Music recognition error: \(error.localizedDescription)")
                 
                 await MainActor.run {
-                    viewModel.recognitionResult = errorMessage
+                    guard recognitionSessionNonce == session else { return }
+                    viewModel.recognitionResult = Self.noMusicRecognitionMessage
                     viewModel.isRecognizing = false
                 }
                 // Wait a moment to show the error, then continue
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 await MainActor.run {
+                    guard recognitionSessionNonce == session else { return }
                     onProjectCreated(project)
                 }
             }

@@ -3,8 +3,10 @@ import SwiftUI
 
 @MainActor
 class CaptureAudioViewModel: ObservableObject {
+    static let maxRecordingSeconds: Int = 30
+    
     @Published var recordingState: RecordingState = .idle
-    @Published var timeRemaining: Int = 15
+    @Published var timeRemaining: Int = CaptureAudioViewModel.maxRecordingSeconds
     @Published var isRecognizing = false
     @Published var recognitionResult: String?
     
@@ -15,6 +17,8 @@ class CaptureAudioViewModel: ObservableObject {
     }
     
     func startTimer() {
+        // Ensure we never have multiple timers running (which would double-decrement).
+        stopTimer()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in
@@ -37,7 +41,7 @@ class CaptureAudioViewModel: ObservableObject {
     func reset() {
         stopTimer()
         recordingState = .idle
-        timeRemaining = 15
+        timeRemaining = Self.maxRecordingSeconds
         recognitionResult = nil
     }
 }

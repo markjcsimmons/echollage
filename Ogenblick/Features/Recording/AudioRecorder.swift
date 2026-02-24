@@ -73,6 +73,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
             recorder.stop()
             await withCheckedContinuation { continuation in
                 self.stopCompletion = continuation
+                self.ensureStopCompletionResumesAfterTimeout()
             }
             return nil
         }
@@ -85,10 +86,29 @@ final class AudioRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
         await withCheckedContinuation { continuation in
             // Store continuation to resume when delegate callback completes
             self.stopCompletion = continuation
+            self.ensureStopCompletionResumesAfterTimeout()
         }
         
         print("🎤 stopRecording() completed, returning duration: \(duration)s")
         return duration
+    }
+
+    private func ensureStopCompletionResumesAfterTimeout() {
+        // Safety net: in rare cases the AVAudioRecorder delegate may not fire,
+        // which would hang stopRecording() forever and freeze the app.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            guard let self = self else { return }
+            guard let completion = self.stopCompletion else { return }
+            
+            print("⚠️ stopRecording timeout reached — forcing completion")
+            self.meterTimer?.invalidate()
+            self.meterTimer = nil
+            self.meterLevel = 0.0
+            self.isRecording = false
+            self.audioRecorder = nil
+            self.stopCompletion = nil
+            completion.resume()
+        }
     }
     
     // MARK: - AVAudioRecorderDelegate

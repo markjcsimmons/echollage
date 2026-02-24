@@ -50,17 +50,70 @@ struct CollageEditorView: View {
     // Removed: showDrawingToolbar - will show colors inline when paint is active
     
     // Undo stack to support reverting complex actions like split/add/delete
-    enum UndoAction {
+    enum UndoAction: Equatable {
         case split(original: ImageLayer, pieces: [ImageLayer])
-        case addImage(layer: ImageLayer)
+        case addImage(layer: ImageLayer, index: Int)
         case deleteImage(layer: ImageLayer, index: Int)
         case erase(layerId: UUID, previousFileName: String?)
         case draw(previousDrawingBase64: String?) // Canvas-wide drawing only (no layerId needed)
-        case addText(layer: TextLayer)
+        case addText(layer: TextLayer, index: Int)
         case deleteText(layer: TextLayer, index: Int)
         case removeBackground(layerId: UUID, backupFileName: String)
+        case transform(layerId: UUID, previous: Transform2D, new: Transform2D)
     }
     @State private var undoStack: [UndoAction] = []
+    
+    // Single-step redo buffer (only valid immediately after an undo)
+    private struct RedoBuffer {
+        let action: UndoAction
+        var drawRedoBase64: String? = nil
+        var eraseRedoFileName: String? = nil
+        var removeBackgroundProcessedFileName: String? = nil
+    }
+    @State private var redoBuffer: RedoBuffer? = nil
+    @State private var isPerformingUndoRedo: Bool = false
+    @State private var lastUndoStackTop: UndoAction? = nil
+    
+    // Single-step redo for paint-mode stroke undo
+    @State private var drawingRedoData: Data? = nil
+    @State private var isPerformingStrokeUndoRedo: Bool = false
+    @State private var pencilKitCanvasNonce: Int = 0
+    @State private var isFinishingDrawingSave: Bool = false
+    @State private var drawingApplyToken: Int = 0
+    @State private var isUndoRedoBusy: Bool = false
+    
+    // Prevent accidental deletions when user is manipulating an image (pinch/rotate/drag)
+    @State private var lastImageManipulationAt: Date = .distantPast
+    
+    @AppStorage("hasSeenEditorCoachMarks") private var hasSeenEditorCoachMarks: Bool = false
+    @State private var showEditorCoachMarks: Bool = false
+    @State private var editorCoachStepIndex: Int = 0
+
+    private func clearRedoForNewUserAction() {
+        if redoBuffer != nil {
+            clearRedoBuffer(deleteBackupForRemoveBackground: true)
+        }
+    }
+    
+    private func cleanupResources(for action: UndoAction) {
+        if case let .removeBackground(_, backupFileName) = action {
+            let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
+            try? FileManager.default.removeItem(at: backupURL)
+        }
+    }
+    
+    private func recordUndo(_ action: UndoAction) {
+        // Any new user action clears redo, and replaces the single-step undo.
+        clearRedoForNewUserAction()
+        
+        // If we're replacing the existing single-step undo, clean up any resources tied to it.
+        if let existing = undoStack.last {
+            cleanupResources(for: existing)
+        }
+        
+        undoStack = [action]
+        lastUndoStackTop = action
+    }
     
     // Track which phase of the flow we're in
     enum EditorPhase {
@@ -203,385 +256,560 @@ struct CollageEditorView: View {
     }
 
     var body: some View {
-        ZStack {
-            // Background covering absolutely everything from edge to edge
-            backgroundView
-                .ignoresSafeArea(.all)
-                .onTapGesture {
-                    // If paint tool is active, tap to deselect it; if erase tool is active, deselect it; otherwise cycle backgrounds
-                    if isDrawing {
-                        print("🎨 Background tapped while paint active - deselecting paint tool")
-                        SoundEffectPlayer.shared.playClick()
-                        handleDoneDrawing() // Save current drawing
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            isDrawing = false
-                            selectedTool = .pen
-                        }
-                    } else if selectedTool == .erase {
-                        print("🧹 Background tapped while erase active - deselecting erase tool")
-                        SoundEffectPlayer.shared.playClick()
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            selectedTool = .pen
-                        }
-                    } else {
-                    cycleBackground()
-                    }
-                }
-            
-            // Canvas area (transparent, shows cork behind) - fills entire screen
-            canvasView
-                .ignoresSafeArea(.all)
-                
-            // Bottom toolbar with action buttons - 6x1 grid (always visible)
-            // Positioned at bottom with white background
-            VStack {
-                Spacer()
-                actionButtonsContent
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 12)
-                    .background(Color.white)
-            }
-            .ignoresSafeArea(edges: .bottom) // Extend white into bottom safe area
-            
-            // Centered "Add Images" button when no images yet (same position as SAVE button)
-            if project.imageLayers.isEmpty {
-                SharedButtonOverlay {
-                    buttonLabel
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            SoundEffectPlayer.shared.playClick()
-                            showImageSourcePicker = true
-                        }
+        contentView
+    }
+    
+    private var contentView: some View {
+        contentViewBase
+            .modifier(
+                EditorCoachMarksHost(
+                    show: showEditorCoachMarks,
+                    stepIndex: $editorCoachStepIndex,
+                    onDismiss: dismissEditorCoachMarks
+                )
+            )
+    }
+    
+    private var contentViewBase: some View {
+        mainScene
+            .coordinateSpace(name: "editor.coachmarks")
+            .ignoresSafeArea(.all, edges: .all)
+            .navigationBarHidden(true)
+            .sheet(isPresented: $showPhotoPicker) {
+                PhotoPicker(selectionLimit: 0) { images in
+                    // Keep SwiftUI sheet state in sync even if the picker dismisses itself.
+                    showPhotoPicker = false
+                    addImages(images)
                 }
             }
-            
-            // Reset canvas button (top left)
-            VStack {
-                HStack {
-                    Button {
-                        SoundEffectPlayer.shared.playClick()
-                        showResetConfirmation = true
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise.circle")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(
-                                Circle()
-                                    .fill(Color.red.opacity(0.8))
-                            )
+            .sheet(isPresented: $showCamera) {
+                CameraPicker { image in
+                    showCamera = false
+                    if let image = image {
+                        addImages([image])
                     }
-                    .padding(.top, 60)
-                    .padding(.leading, 20)
-                    
-                    Spacer()
                 }
-                Spacer()
             }
-            .zIndex(3000)
-            
-            // Share button (top right) - directly opens share options
-            VStack {
-                HStack {
-                    Spacer()
-                    
-                    Button {
-                        SoundEffectPlayer.shared.playClick()
-                        handleShareButtonTap()
-                    } label: {
-                        ZStack {
-                                Circle()
-                                .fill(Color.blue.opacity(isExporting ? 0.7 : 0.9))
-                                .frame(width: 44, height: 44)
-                                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
-                            
-                            if isExporting {
-                                ProgressView()
-                                    .tint(.white)
-                                    .scaleEffect(0.8)
-                            } else {
-                                Image(systemName: "square.and.arrow.up.fill")
-                                    .font(.system(size: 20, weight: .medium))
-                                    .foregroundStyle(.white)
-                            }
-                        }
+            .sheet(isPresented: $showPaywall) {
+                PaywallView()
+                    .presentationDetents([.medium, .large])
+            }
+            .sheet(isPresented: $showLayerPanel) {
+                LayerPanel(project: $project) {
+                    store.update(project)
+                }
+            }
+            .alert("Reset Moment?", isPresented: $showResetConfirmation) {
+                Button("Cancel", role: .cancel) { }
+                Button("Reset", role: .destructive) {
+                    resetCanvas()
+                }
+            } message: {
+                Text("This will delete everything and return you to the home screen to start a new moment.")
+            }
+            .alert("Export Error", isPresented: $showExportError) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(exportError ?? "Unknown error occurred during export")
+            }
+            .overlay(textEditorOverlay)
+            .onAppear(perform: handleOnAppear)
+            .onChange(of: undoStack, perform: handleUndoStackChanged)
+            // REMOVED: .onChange(of: drawingData) that was always updating global canvas
+            // Drawing should only be saved when Done button is clicked or drawing toolbar is closed
+            .fullScreenCover(isPresented: $showCapture) {
+                CaptureAudioView(project: $project) {
+                    hasCompletedCapture = true
+                    showCapture = false
+                }
+                .environmentObject(store)
+            }
+            .alert("Name Your Sound", isPresented: $isEditingAudioName) {
+                TextField("Sound name", text: $editingAudioName)
+                Button("Cancel", role: .cancel) { }
+                Button("Save") {
+                    project.customAudioName = editingAudioName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if project.customAudioName?.isEmpty == true {
+                        project.customAudioName = nil
                     }
-                    .disabled(isExporting)
-                    .padding(.top, 60)
-                    .padding(.trailing, 20)
-                    
-                    // Export status text (appears next to button when exporting)
-                    if isExporting {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Preparing")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.9))
-                            Text("Échollage...")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.9))
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(.black.opacity(0.6))
+                    store.update(project)
+                }
+            } message: {
+                Text("Give this sound a custom name")
+            }
+            .confirmationDialog("Add Image", isPresented: $showImageSourcePicker) {
+                Button("Take Photo") {
+                    // Dismiss dialog first, then present sheet (prevents occasional no-op).
+                    showImageSourcePicker = false
+                    DispatchQueue.main.async {
+                        showPhotoPicker = false
+                        showCamera = true
+                    }
+                }
+                Button("Choose from Photos") {
+                    showImageSourcePicker = false
+                    DispatchQueue.main.async {
+                        showCamera = false
+                        showPhotoPicker = true
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+    }
+    
+    private func dismissEditorCoachMarks() {
+        hasSeenEditorCoachMarks = true
+        showEditorCoachMarks = false
+    }
+    
+    private struct EditorCoachMarksHost: ViewModifier {
+        let show: Bool
+        @Binding var stepIndex: Int
+        let onDismiss: () -> Void
+        
+        func body(content: Content) -> some View {
+            content
+                .overlayPreferenceValue(EditorCoachMarkFramesPreferenceKey.self) { frames in
+                    if show {
+                        EditorCoachMarksOverlay(
+                            frames: frames,
+                            stepIndex: $stepIndex,
+                            onSkipOrFinish: onDismiss
                         )
+                        .zIndex(20000)
+                    }
+                }
+        }
+    }
+    
+    private var mainScene: some View {
+        ZStack {
+            backgroundLayer
+            canvasLayer
+            bottomToolbarLayer
+            addImagesOverlay
+            resetButtonOverlay
+            shareButtonOverlay
+            audioButtonOverlay
+            drawingControlsOverlay
+        }
+    }
+    
+    private var backgroundLayer: some View {
+        backgroundView
+            .ignoresSafeArea(.all)
+            .onTapGesture(perform: handleBackgroundTap)
+    }
+    
+    private var canvasLayer: some View {
+        canvasView
+            .ignoresSafeArea(.all)
+    }
+    
+    private var bottomToolbarLayer: some View {
+        VStack {
+            Spacer()
+            actionButtonsContent
+                .padding(.horizontal, 8)
+                .padding(.vertical, 12)
+                .background(Color.white)
+        }
+        .ignoresSafeArea(edges: .bottom)
+    }
+    
+    @ViewBuilder
+    private var addImagesOverlay: some View {
+        if project.imageLayers.isEmpty {
+            SharedButtonOverlay {
+                buttonLabel
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        SoundEffectPlayer.shared.playClick()
+                        showImageSourcePicker = true
+                    }
+                    .editorCoachMarkTarget("editor.addImagesOverlay")
+            }
+        }
+    }
+    
+    private var resetButtonOverlay: some View {
+        VStack {
+            HStack {
+                Button {
+                    SoundEffectPlayer.shared.playClick()
+                    showResetConfirmation = true
+                } label: {
+                    Image(systemName: "arrow.counterclockwise.circle")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(
+                            Circle()
+                                .fill(Color.red.opacity(0.8))
+                        )
+                }
+                .padding(.top, 60)
+                .padding(.leading, 20)
+
+                Button {
+                    SoundEffectPlayer.shared.playClick()
+                    editorCoachStepIndex = 0
+                    showEditorCoachMarks = true
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                        .background(
+                            Circle()
+                                .fill(Color.black.opacity(0.55))
+                        )
+                }
+                // Long-press: reset the "seen" flag and show from step 1.
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                        let generator = UIImpactFeedbackGenerator(style: .medium)
+                        generator.impactOccurred()
+                        hasSeenEditorCoachMarks = false
+                        editorCoachStepIndex = 0
+                        showEditorCoachMarks = true
+                    }
+                )
+                .padding(.top, 60)
+                .padding(.leading, 10)
+                
+                Spacer()
+            }
+            Spacer()
+        }
+        .zIndex(3000)
+    }
+    
+    private var shareButtonOverlay: some View {
+        VStack {
+            HStack {
+                Spacer()
+                
+                Button {
+                    SoundEffectPlayer.shared.playClick()
+                    handleShareButtonTap()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.blue.opacity(isExporting ? 0.7 : 0.9))
+                            .frame(width: 44, height: 44)
+                            .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                        
+                        if isExporting {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "square.and.arrow.up.fill")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+                .disabled(isExporting)
+                .padding(.top, 60)
+                .padding(.trailing, 20)
+                
+                if isExporting {
+                    exportStatusView
                         .padding(.top, 60)
                         .padding(.trailing, 4)
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
-                    }
                 }
+            }
+            Spacer()
+        }
+        .zIndex(3000)
+        .animation(.easeInOut(duration: 0.2), value: isExporting)
+    }
+    
+    private var exportStatusView: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Preparing")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.9))
+            Text("Échollage...")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.9))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(.black.opacity(0.6))
+        )
+    }
+    
+    @ViewBuilder
+    private var audioButtonOverlay: some View {
+        if project.audioFileName != nil {
+            VStack {
+                Button {
+                    toggleAudioPlayback()
+                } label: {
+                    audioButtonLabel
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 60)
                 Spacer()
             }
-            .zIndex(3000) // Above everything
-            .animation(.easeInOut(duration: 0.2), value: isExporting)
+            .allowsHitTesting(true)
+            .zIndex(3000)
+        }
+    }
+    
+    private var audioButtonLabel: some View {
+        VStack(spacing: 0) {
+            Image(systemName: player.isPlaying ? "pause.circle.fill" : "waveform.circle.fill")
+                .font(.system(size: 32))
+                .foregroundStyle(.white)
             
-            // Audio playback button (always on top, outside canvas)
-            if project.audioFileName != nil {
-                VStack {
-                    Button {
-                        print("🎵 Audio button tapped!")
-                        toggleAudioPlayback()
-                    } label: {
-                        VStack(spacing: 0) {
-                            // Always show just the icon
-                            Image(systemName: player.isPlaying ? "pause.circle.fill" : "waveform.circle.fill")
-                                .font(.system(size: 32))
-                                .foregroundStyle(.white)
-                            
-                            // Show metadata below only when playing
-                            if player.isPlaying, let metadata = project.musicMetadata {
-                                VStack(spacing: 2) {
-                                    Text(metadata.title)
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .italic()
-                                        .foregroundStyle(.white)
-                                        .multilineTextAlignment(.center)
-                                        .lineLimit(1)
-                                    Text(metadata.artist)
-                                        .font(.system(size: 12, weight: .regular))
-                                        .italic()
-                                        .foregroundStyle(.white.opacity(0.8))
-                                        .multilineTextAlignment(.center)
-                                        .lineLimit(1)
-                                }
-                                .padding(.top, 4)
-                                .transition(.opacity)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(player.isPlaying ? Color.orange.opacity(0.9) : Color.black.opacity(0.7))
-                                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-                        )
-                        .contentShape(Rectangle()) // Make entire area tappable
-                    }
-                    .buttonStyle(.plain) // Remove default button styling that might block hits
-                    .padding(.top, 60)
-                    Spacer()
+            if player.isPlaying, let metadata = project.musicMetadata {
+                VStack(spacing: 2) {
+                    Text(metadata.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .italic()
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(1)
+                    Text(metadata.artist)
+                        .font(.system(size: 12, weight: .regular))
+                        .italic()
+                        .foregroundStyle(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(1)
                 }
-                .allowsHitTesting(true) // Ensure button can receive taps
-                .zIndex(3000) // Above everything including big button
+                .padding(.top, 4)
+                .transition(.opacity)
             }
-            
-            // Drawing toolbar overlay
-            // Inline color picker when paint is active (replaces DrawingToolbar)
-            if isDrawing {
-                VStack {
-                    Spacer()
-                    HStack(spacing: 6) {
-                        // Undo button for drawing
-                        ToolbarGridButton(
-                            icon: "arrow.uturn.backward",
-                            isDisabled: drawingHistory.count <= 1
-                        ) {
-                            SoundEffectPlayer.shared.playClick()
-                        if drawingHistory.count > 1 {
-                            drawingHistory.removeLast() // Remove current
-                            let previousData = drawingHistory.last ?? Data()
-                            drawingData = previousData
-                                print("🎨 Undid drawing stroke")
-                        } else if drawingHistory.count == 1 {
-                            drawingData = Data()
-                            drawingHistory = [Data()]
-                            print("🎨 Cleared all drawing")
-                            }
-                        }
-                        
-                        // Color buttons (6 colors)
-                        ForEach([Color.white, .black, .red, .yellow, .blue, .purple], id: \.self) { color in
-                            Button {
-                                SoundEffectPlayer.shared.playClick()
-                                withAnimation(.easeOut(duration: 0.15)) {
-                                    strokeColor = color
-                                }
-                            } label: {
-                                Circle()
-                                    .fill(color)
-                                    .frame(width: 44, height: 44)
-                                    .overlay(
-                                        Circle()
-                                            .stroke(strokeColor == color ? Color.white : Color.white.opacity(0.3), lineWidth: strokeColor == color ? 2.5 : 1)
-                                    )
-                                    .shadow(color: strokeColor == color ? color.opacity(0.6) : Color.black.opacity(0.25), radius: strokeColor == color ? 4 : 2, y: 2)
-                                    .scaleEffect(strokeColor == color ? 1.1 : 1.0)
-                            }
-                        }
-                    }
-                    .padding(8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18)
-                            .fill(.ultraThinMaterial)
-                            .shadow(color: Color.black.opacity(0.3), radius: 20, y: 10)
-                    )
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(player.isPlaying ? Color.orange.opacity(0.9) : Color.black.opacity(0.7))
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+        )
+        .contentShape(Rectangle())
+    }
+    
+    @ViewBuilder
+    private var drawingControlsOverlay: some View {
+        if isDrawing {
+            VStack {
+                Spacer()
+                drawingControlsBar
                     .padding(.bottom, 30)
                     .padding(.horizontal, 16)
+            }
+            .transition(.move(edge: .bottom))
+        }
+    }
+    
+    private var drawingControlsBar: some View {
+        HStack(spacing: 6) {
+            ToolbarGridButton(
+                icon: (drawingRedoData == nil) ? "arrow.uturn.backward" : "arrow.uturn.forward",
+                isDisabled: (drawingRedoData == nil) ? (drawingHistory.count <= 1) : false
+            ) {
+                isPerformingStrokeUndoRedo = true
+                DispatchQueue.main.async {
+                    self.isPerformingStrokeUndoRedo = false
                 }
-                .transition(.move(edge: .bottom))
-            }
-        }
-        .ignoresSafeArea(.all, edges: .all)
-        .navigationBarHidden(true)
-        .sheet(isPresented: $showPhotoPicker) {
-            PhotoPicker(selectionLimit: 0) { images in
-                addImages(images)
-            }
-        }
-        .sheet(isPresented: $showCamera) {
-            CameraPicker { image in
-                if let image = image {
-                    addImages([image])
-                }
-            }
-        }
-        .sheet(isPresented: $showPaywall) {
-            PaywallView()
-                .presentationDetents([.medium, .large])
-        }
-        .sheet(isPresented: $showLayerPanel) {
-            LayerPanel(project: $project) {
-                store.update(project)
-            }
-        }
-        .alert("Reset Moment?", isPresented: $showResetConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Reset", role: .destructive) {
-                resetCanvas()
-            }
-        } message: {
-            Text("This will delete everything and return you to the home screen to start a new moment.")
-        }
-        .alert("Export Error", isPresented: $showExportError) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text(exportError ?? "Unknown error occurred during export")
-        }
-        .overlay(
-            Group {
-                if showTextEditor {
-                    TextEditorOverlay(
-                        text: $editingText,
-                        textColor: $editingTextColor,
-                        fontSize: $editingFontSize,
-                        onDone: {
-                            if let textId = selectedTextId,
-                               let idx = project.textLayers.firstIndex(where: { $0.id == textId }) {
-                                // Only save if text is not empty
-                                if !editingText.trimmingCharacters(in: .whitespaces).isEmpty {
-                                project.textLayers[idx].text = editingText
-                                project.textLayers[idx].hexColor = editingTextColor.toHex() ?? "#000000"
-                                    project.textLayers[idx].fontSize = editingFontSize
-                                print("✏️ Updated text to: \(editingText)")
-                                } else {
-                                    // Remove empty text layer and record undo
-                                    let layer = project.textLayers[idx]
-                                    project.textLayers.remove(at: idx)
-                                    undoStack.append(.deleteText(layer: layer, index: idx))
-                                    print("✏️ Removed empty text layer")
-                                }
-                            }
-                            
-                            selectedTextId = nil
-                            showTextEditor = false
-                            
-                            // Batch store update after UI dismisses
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                store.update(project)
-                            }
-                        },
-                        onCancel: {
-                            // Remove text layer if it was just created and user cancelled
-                            if let textId = selectedTextId,
-                               let idx = project.textLayers.firstIndex(where: { $0.id == textId }),
-                               let layer = project.textLayers.first(where: { $0.id == textId }),
-                               layer.text.isEmpty {
-                                project.textLayers.remove(at: idx)
-                                // Don't add to undo stack - the addText action is already there
-                                // and will be undone if needed
-                                if let undoIdx = undoStack.lastIndex(where: {
-                                    if case .addText(let addedLayer) = $0, addedLayer.id == textId {
-                                        return true
-                                    }
-                                    return false
-                                }) {
-                                    undoStack.remove(at: undoIdx)
-                                }
-                                store.update(project)
-                                print("✏️ Cancelled - removed empty text layer")
-                            }
-                            selectedTextId = nil
-                            showTextEditor = false
-                        }
-                    )
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9)),
-                        removal: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9))
-                    ))
-                    .zIndex(10000)
+                
+                if let redo = drawingRedoData {
+                    // Redo the last stroke-undo
+                    drawingData = redo
+                    if drawingHistory.last != redo {
+                        drawingHistory.append(redo)
+                    }
+                    drawingRedoData = nil
+                    pencilKitCanvasNonce += 1
+                } else {
+                    // Undo last stroke (single-step redo available)
+                    if drawingHistory.count > 1 {
+                        drawingRedoData = drawingHistory.last
+                        drawingHistory.removeLast()
+                        drawingData = drawingHistory.last ?? Data()
+                        pencilKitCanvasNonce += 1
+                    } else if drawingHistory.count == 1 {
+                        drawingRedoData = drawingHistory.last
+                        drawingData = Data()
+                        drawingHistory = [Data()]
+                        pencilKitCanvasNonce += 1
+                    }
                 }
             }
+            
+            ForEach([Color.white, .black, .red, .yellow, .blue, .purple], id: \.self) { color in
+                Button {
+                    SoundEffectPlayer.shared.playClick()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        strokeColor = color
+                    }
+                } label: {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 44, height: 44)
+                        .overlay(
+                            Circle()
+                                .stroke(strokeColor == color ? Color.white : Color.white.opacity(0.3),
+                                        lineWidth: strokeColor == color ? 2.5 : 1)
+                        )
+                        .shadow(color: strokeColor == color ? color.opacity(0.6) : Color.black.opacity(0.25),
+                                radius: strokeColor == color ? 4 : 2,
+                                y: 2)
+                        .scaleEffect(strokeColor == color ? 1.1 : 1.0)
+                }
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(.ultraThinMaterial)
+                .shadow(color: Color.black.opacity(0.3), radius: 20, y: 10)
         )
-        .onAppear {
-            if let base64 = project.drawingDataBase64, let data = Data(base64Encoded: base64) {
-                drawingData = data
+    }
+    
+    @ViewBuilder
+    private var textEditorOverlay: some View {
+        Group {
+            if showTextEditor {
+                TextEditorOverlay(
+                    isShowing: $showTextEditor,
+                    text: $editingText,
+                    textColor: $editingTextColor,
+                    fontSize: $editingFontSize,
+                    onDone: handleTextEditorDone,
+                    onCancel: handleTextEditorCancel
+                )
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9)),
+                    removal: .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.9))
+                ))
+                .zIndex(10000)
             }
-            hasCompletedCapture = true
         }
-        // REMOVED: .onChange(of: drawingData) that was always updating global canvas
-        // This was causing image-specific drawings to also appear in global canvas (top-left)
-        // Drawing should only be saved when Done button is clicked or drawing toolbar is closed
-        // DO NOT auto-save drawingData changes - this causes conflicts between image and global canvas drawing
-        .fullScreenCover(isPresented: $showCapture) {
-            CaptureAudioView(project: $project) {
-                hasCompletedCapture = true
-                showCapture = false
+    }
+    
+    private func handleOnAppear() {
+        applyCanvasDrawing(base64: project.drawingDataBase64)
+        hasCompletedCapture = true
+
+        // Text: enforce single text layer going forward.
+        // If legacy projects contain multiple text layers, keep the first and drop the rest.
+        if project.textLayers.count > 1 {
+            let keep = project.textLayers[0]
+            project.textLayers = [keep]
+            store.update(project)
+        }
+        
+        if !hasSeenEditorCoachMarks {
+            // Delay a tick so anchors are available for spotlight positioning.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                editorCoachStepIndex = 0
+                showEditorCoachMarks = true
             }
-            .environmentObject(store)
         }
-        .alert("Name Your Sound", isPresented: $isEditingAudioName) {
-            TextField("Sound name", text: $editingAudioName)
-            Button("Cancel", role: .cancel) { }
-            Button("Save") {
-                project.customAudioName = editingAudioName.trimmingCharacters(in: .whitespacesAndNewlines)
-                if project.customAudioName?.isEmpty == true {
-                    project.customAudioName = nil
+    }
+    
+    private func handleUndoStackChanged(_ newStack: [UndoAction]) {
+        // Enforce: single-step undo + single-step redo toggle.
+        // Clear redo ONLY when a new action is recorded (not when undo pops the stack).
+        let oldTop = lastUndoStackTop
+        let newTop = newStack.last
+        lastUndoStackTop = newTop
+        
+        guard !isPerformingUndoRedo else { return }
+        
+        // New action recorded if top action changed to a non-nil value.
+        let isNewRecordedAction = (newTop != nil && newTop != oldTop)
+        if isNewRecordedAction, redoBuffer != nil {
+            clearRedoBuffer(deleteBackupForRemoveBackground: true)
+        }
+        
+        if newStack.count > 1, let last = newTop {
+            // Clean up any resources tied to discarded undo actions.
+            for action in newStack.dropLast() {
+                if case let .removeBackground(_, backupFileName) = action {
+                    let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
+                    try? FileManager.default.removeItem(at: backupURL)
                 }
-                store.update(project)
             }
-        } message: {
-            Text("Give this sound a custom name")
+            undoStack = [last]
         }
-        .confirmationDialog("Add Image", isPresented: $showImageSourcePicker) {
-            Button("Take Photo") {
-                showCamera = true
+    }
+    
+    private func handleBackgroundTap() {
+        if isDrawing {
+            SoundEffectPlayer.shared.playClick()
+            finishDrawingAndExit()
+        } else if selectedTool == .erase {
+            SoundEffectPlayer.shared.playClick()
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                selectedTool = .pen
             }
-            Button("Choose from Photos") {
-                showPhotoPicker = true
-            }
-            Button("Cancel", role: .cancel) { }
+        } else {
+            cycleBackground()
         }
+    }
+    
+    private func handleTextEditorDone() {
+        if let textId = selectedTextId,
+           let idx = project.textLayers.firstIndex(where: { $0.id == textId }) {
+            if !editingText.trimmingCharacters(in: .whitespaces).isEmpty {
+                project.textLayers[idx].text = editingText
+                project.textLayers[idx].hexColor = editingTextColor.toHex() ?? "#000000"
+                project.textLayers[idx].fontSize = editingFontSize
+                
+                // If this text layer was just created, update the undo payload so redo restores
+                // the final edited content (not the initial empty layer).
+                if let last = undoStack.last, case .addText(let addedLayer, let addedIndex) = last, addedLayer.id == textId {
+                    let updatedLayer = project.textLayers[idx]
+                    let updatedAction: UndoAction = .addText(layer: updatedLayer, index: addedIndex)
+                    undoStack = [updatedAction]
+                    lastUndoStackTop = updatedAction
+                }
+            } else {
+                let layer = project.textLayers[idx]
+                project.textLayers.remove(at: idx)
+                recordUndo(.deleteText(layer: layer, index: idx))
+            }
+        }
+        
+        selectedTextId = nil
+        showTextEditor = false
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            store.update(project)
+        }
+    }
+    
+    private func handleTextEditorCancel() {
+        if let textId = selectedTextId,
+           let idx = project.textLayers.firstIndex(where: { $0.id == textId }),
+           let layer = project.textLayers.first(where: { $0.id == textId }),
+           layer.text.isEmpty {
+            project.textLayers.remove(at: idx)
+            
+            // If this was a brand-new (empty) text layer, discard the undo entry for adding it.
+            if let last = undoStack.last, case .addText(let addedLayer, _) = last, addedLayer.id == textId {
+                undoStack.removeAll()
+                lastUndoStackTop = nil
+                if redoBuffer != nil {
+                    clearRedoBuffer(deleteBackupForRemoveBackground: true)
+                }
+            }
+            store.update(project)
+        }
+        
+        selectedTextId = nil
+        showTextEditor = false
     }
     
     // Cache loaded images to avoid disk I/O every frame
@@ -685,12 +913,36 @@ struct CollageEditorView: View {
                 // Always transparent to show corkboard background
                 // Note: When paint is active, tapping background (above) will deselect paint
                 Color.clear
+                    .editorCoachMarkTarget("editor.canvas")
+                    .contentShape(Rectangle())
+                    .highPriorityGesture(
+                        TapGesture(count: 2)
+                            .onEnded {
+                                // Double tap empty canvas to delete drawing (keep drawing layer non-hit-testable
+                                // so images remain selectable after painting).
+                                guard !isDrawing, !drawingData.isEmpty else { return }
+                                print("🗑️ Double tap on canvas - deleting canvas drawing")
+                                SoundEffectPlayer.shared.playClick()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                    SoundEffectPlayer.shared.playClick()
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    self.deleteCanvasDrawing()
+                                }
+                            }
+                    )
                 
                 ForEach(sortedImageLayers) { layer in
-                    imageLayerView(for: layer, canvasSize: canvasSize)
+                    imageLayerView(
+                        for: layer,
+                        canvasSize: canvasSize,
+                        isCoachMarkTarget: layer.id == sortedImageLayers.first?.id
+                    )
                 }
                 
-                ForEach(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex }), id: \.id) { layer in
+                // Only allow one text layer (the first) to be shown/edited.
+                let visibleTextLayers = Array(project.textLayers.sorted(by: { $0.zIndex < $1.zIndex }).prefix(1))
+                ForEach(visibleTextLayers, id: \.id) { layer in
                     TransformableText(
                         text: layer.text,
                         fontName: layer.fontName,
@@ -706,18 +958,7 @@ struct CollageEditorView: View {
                     } onTap: {
                         guard !showTextEditor else { return } // Prevent multiple taps
                         SoundEffectPlayer.shared.playClick()
-                        withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
-                            selectedTextId = layer.id
-                        }
-                        editingText = layer.text
-                        editingTextColor = Color(hex: layer.hexColor)
-                        editingFontSize = layer.fontSize
-                        
-                        // Defer showing editor for smoother performance
-                        DispatchQueue.main.async {
-                            self.showTextEditor = true
-                        }
-                        print("✏️ Showing text editor for: \(layer.id)")
+                        addTextLayer()
                     } onDoubleTap: {
                         // Long press to delete text
                         guard !showTextEditor else { return }
@@ -735,34 +976,20 @@ struct CollageEditorView: View {
                     } onTextChange: { _ in
                         // Not used in simplified version
                     }
+                    // While painting, text layers should not intercept touches.
+                    .allowsHitTesting(!isDrawing)
                     .zIndex(2000 + Double(layer.zIndex)) // High zIndex to render on top, but only captures touches on actual text
                 }
                 
                 // Show saved canvas-wide drawing (only when NOT actively drawing, to avoid conflicts)
-                if !isDrawing, 
-                   let base64 = project.drawingDataBase64,
-                   let drawingDataForCanvas = Data(base64Encoded: base64),
-                   !drawingDataForCanvas.isEmpty {
+                if !isDrawing, !drawingData.isEmpty {
                     ImageBoundDrawingView(
-                        drawingData: drawingDataForCanvas,
+                        drawingData: drawingData,
                         imageSize: canvasSize,
                         isInteractive: false
                     )
                     .frame(width: canvasSize.width, height: canvasSize.height)
-                    .contentShape(Rectangle()) // Make entire area tappable
-                    .onTapGesture(count: 2) {
-                        // Double tap to delete drawing
-                        print("🗑️ Double tap detected - deleting canvas drawing")
-                        // Play two clicks for double tap
-                        SoundEffectPlayer.shared.playClick()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            SoundEffectPlayer.shared.playClick()
-                        }
-                        // Delay deletion to avoid gesture conflicts
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            self.deleteCanvasDrawing()
-                        }
-                    }
+                    .allowsHitTesting(false)
                     .zIndex(500) // Above images, below active drawing
                 }
                 
@@ -777,25 +1004,29 @@ struct CollageEditorView: View {
                         expectedSize: canvasSize, // CRITICAL: Pass expected size for bounds matching
                             onDrawingChanged: { newData in
                             print("🎨 Canvas drawing changed, data size: \(newData.count) bytes")
+                                // Ignore callback noise caused by programmatic undo/redo
+                                if isPerformingStrokeUndoRedo {
+                                    return
+                                }
                                 if !drawingHistory.isEmpty && drawingHistory.last == newData {
                                     print("🎨 Skipping duplicate")
                                     return
                                 }
+                                // Any new action clears the single-step redo toggle
+                                clearRedoForNewUserAction()
                                 drawingHistory.append(newData)
                                 print("🎨 Added to history, total states: \(drawingHistory.count)")
+                                // Any new drawing clears redo for stroke-undo
+                                drawingRedoData = nil
                         },
                         onTapOnly: {
                             // When user taps canvas (not draws), deselect paint tool
                             print("🎨 Canvas tapped (not drawn) while paint active - deselecting paint tool")
                             SoundEffectPlayer.shared.playClick()
-                            handleDoneDrawing() // Save current drawing
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                isDrawing = false
-                                selectedTool = .pen
-                            }
+                            finishDrawingAndExit()
                             }
                         )
-                        .id("pencilkit-canvas-\(drawingData.count)")
+                        .id("pencilkit-canvas-\(pencilKitCanvasNonce)")
                         .frame(width: canvasSize.width, height: canvasSize.height)
                         .allowsHitTesting(true)
                     .zIndex(1000) // Above saved drawing and images
@@ -859,8 +1090,8 @@ struct CollageEditorView: View {
     private func unifiedToolbar() -> some View {
             // 1. Undo
             ToolbarGridButton(
-                icon: "arrow.uturn.backward",
-                isDisabled: undoStack.isEmpty || isDrawing // Disable when drawing (use drawing undo instead)
+                icon: (redoBuffer == nil) ? "arrow.uturn.backward" : "arrow.uturn.forward",
+                isDisabled: ((undoStack.isEmpty && redoBuffer == nil) || isDrawing) // Disable when drawing (use drawing undo instead)
             ) {
                 undoLastAction()
             }
@@ -868,7 +1099,7 @@ struct CollageEditorView: View {
             // 2. Add Image
             ToolbarGridButton(
                 icon: "photo",
-                isDisabled: project.imageLayers.isEmpty || project.imageLayers.count >= 10,
+                isDisabled: project.imageLayers.count >= 10,
                 shouldThrob: false
             ) {
                 showImageSourcePicker = true
@@ -876,6 +1107,7 @@ struct CollageEditorView: View {
                 selectedTool = .pen
                 isDrawing = false
             }
+            .editorCoachMarkTarget("editor.addImage")
             
             // 3. Mask/Remove Background (disabled if no image selected)
             ToolbarGridButton(
@@ -890,6 +1122,7 @@ struct CollageEditorView: View {
                 selectedTool = .pen
                 isDrawing = false
             }
+            .editorCoachMarkTarget("editor.removeBackground")
             
             // 4. Erase (image-specific, disabled if no image selected) - toggle on/off
             ToolbarGridButton(
@@ -918,10 +1151,8 @@ struct CollageEditorView: View {
         ) {
                 // Toggle: if already drawing, deactivate; otherwise activate
                 if isDrawing && (selectedTool == .pen || selectedTool == .brush) {
-                    // Deactivate drawing - save current drawing first
-                    handleDoneDrawing()
-            selectedTool = .pen
-                    isDrawing = false
+                    // Deactivate drawing - save current drawing first (async) then exit.
+                    finishDrawingAndExit()
                     print("🎨 Paint deactivated")
                 } else {
                     // Deselect text and close text editor when activating paint
@@ -939,19 +1170,18 @@ struct CollageEditorView: View {
             drawingStateBeforeEdit = project.drawingDataBase64
             print("🎨 Captured drawing state before edit: \(drawingStateBeforeEdit?.prefix(20) ?? "nil")")
             
-                    // Load existing canvas drawing
-            if let base64 = project.drawingDataBase64,
-               let data = Data(base64Encoded: base64) {
-                drawingData = data
-                drawingHistory = [data]
-            } else {
-                drawingData = Data()
-                drawingHistory = [Data()]
-            }
+                    // Load existing canvas drawing (decode off-main).
+                    // If it's already loaded into memory, keep the current snapshot.
+                    if drawingData.isEmpty {
+                        applyCanvasDrawing(base64: project.drawingDataBase64)
+                    } else {
+                        drawingHistory = [drawingData]
+                    }
             
                     print("🎨 Started canvas-wide drawing")
                 }
         }
+        .editorCoachMarkTarget("editor.paint")
         
             // 6. Text (canvas-wide, always available)
         ToolbarGridButton(
@@ -959,11 +1189,16 @@ struct CollageEditorView: View {
                 isDisabled: false,
                 isSelected: false // Text is not a persistent tool state
         ) {
-            addTextLayer()
-                // Deactivate drawing when adding text
-                    isDrawing = false
-                selectedTool = .pen
+            // If paint is active, save & exit first to avoid losing strokes / breaking redo.
+            if isDrawing {
+                finishDrawingAndExit {
+                    addTextLayer()
+                }
+            } else {
+                addTextLayer()
+            }
         }
+        .editorCoachMarkTarget("editor.text")
     }
     
     // Individual grid button with 3D shadow effect
@@ -1089,7 +1324,8 @@ struct CollageEditorView: View {
                 DispatchQueue.main.async {
                     self.project = updatedProject
                     if let action = undoAction {
-                        self.undoStack.append(action)
+                        // Single-step undo: record erase as the last action
+                        self.undoStack = [action]
                     }
                 }
             }
@@ -1099,8 +1335,8 @@ struct CollageEditorView: View {
     // UIView that captures pressure-sensitive erase gestures
     class PressureEraseView: UIView {
         var selectedImageId: UUID?
-        var project: Project!
-        var store: ProjectStore!
+        var project: Project?
+        var store: ProjectStore?
         var brushSize: CGFloat = 20
         var onEraseComplete: ((Project, CollageEditorView.UndoAction?) -> Void)?
         
@@ -1168,6 +1404,8 @@ struct CollageEditorView: View {
             
             guard erasePoints.count >= 2,
                   let selectedId = selectedImageId,
+                  var project = project,
+                  let store = store,
                   let idx = CollageEditorView.createLayerIndexMap(from: project.imageLayers)[selectedId] else {
                 print("🧹 Not enough points or no selected image")
                 erasePoints = []
@@ -1253,7 +1491,8 @@ struct CollageEditorView: View {
                 
                 // Save the erased image
                 let fileName = "erased_\(UUID().uuidString).png"
-                let url = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName)
+                guard let store = self.store, let projectId = self.project?.id else { return }
+                let url = store.urlForProjectAsset(projectId: projectId, fileName: fileName)
                 
                 if let data = erasedImage.pngData() {
                     do {
@@ -1261,12 +1500,14 @@ struct CollageEditorView: View {
                         print("🧹 Saved erased image: \(fileName)")
                         
                         DispatchQueue.main.async {
-                            self.project.imageLayers[idx].erasedImageFileName = fileName
-                            self.store.update(self.project)
+                            guard var updated = self.project else { return }
+                            updated.imageLayers[idx].erasedImageFileName = fileName
+                            self.project = updated
+                            store.update(updated)
                             
                             // Create undo action with previous state
                             let undoAction = CollageEditorView.UndoAction.erase(layerId: layer.id, previousFileName: previousErasedFileName)
-                            self.onEraseComplete?(self.project, undoAction)
+                            self.onEraseComplete?(updated, undoAction)
                         }
                     } catch {
                         print("🧹 Failed to save erased image: \(error)")
@@ -1657,6 +1898,11 @@ struct CollageEditorView: View {
     private func addImages(_ images: [UIImage]) {
         guard !images.isEmpty else { return }
         
+        // Enforce the app limit (max 10 images total).
+        let remainingSlots = max(0, 10 - project.imageLayers.count)
+        guard remainingSlots > 0 else { return }
+        let images = Array(images.prefix(remainingSlots))
+        
         // Capture current state for background processing
         let projectId = project.id
         let currentLayerCount = project.imageLayers.count
@@ -1709,9 +1955,13 @@ struct CollageEditorView: View {
             }
             
             // Update UI on main thread
-            for layer in newLayers.sorted(by: { $0.zIndex < $1.zIndex }) {
+            let sortedNewLayers = newLayers.sorted(by: { $0.zIndex < $1.zIndex })
+            for layer in sortedNewLayers {
                 self.project.imageLayers.append(layer)
-                self.undoStack.append(.addImage(layer: layer))
+            }
+            // Single-step undo: only the last added image is undoable.
+            if let last = sortedNewLayers.last {
+                self.recordUndo(.addImage(layer: last, index: max(0, self.project.imageLayers.count - 1)))
             }
             
             // Reset tool state when images are added - no tools should be active
@@ -1726,7 +1976,7 @@ struct CollageEditorView: View {
     }
     
     // Static helper functions for background thread execution
-    private static func downscaleImageStatic(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+    private nonisolated static func downscaleImageStatic(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
         return autoreleasepool {
             let size = image.size
             let maxSide = max(size.width, size.height)
@@ -1747,7 +1997,7 @@ struct CollageEditorView: View {
         }
     }
     
-    private static func calculateImagePositionStatic(for index: Int) -> (x: Double, y: Double) {
+    private nonisolated static func calculateImagePositionStatic(for index: Int) -> (x: Double, y: Double) {
         let imageWidth: Double = 187 / 2
         let imageHeight: Double = 125
         
@@ -1782,7 +2032,7 @@ struct CollageEditorView: View {
     }
 
     @ViewBuilder
-    private func imageLayerView(for layer: ImageLayer, canvasSize: CGSize) -> some View {
+    private func imageLayerView(for layer: ImageLayer, canvasSize: CGSize, isCoachMarkTarget: Bool = false) -> some View {
         if let ui = loadImage(fileName: layer.imageFileName),
            let idx = layerIndexMap[layer.id] {
             let baseSize = baseImageSize(for: ui, canvasSize: canvasSize)
@@ -1791,7 +2041,7 @@ struct CollageEditorView: View {
             let isErasing = selectedTool == .erase && selectedImageId == layer.id
             
             // Use cached transparency and tight bounds calculations
-            let hasTransparency = getCachedTransparency(for: layer.imageFileName, image: ui)
+            let _ = getCachedTransparency(for: layer.imageFileName, image: ui)
             
             ZStack {
                 // ALWAYS show the ErasableImageView with consistent identity
@@ -1842,26 +2092,32 @@ struct CollageEditorView: View {
                                 .modifier(TransformModifier(
                                     transform: $project.imageLayers[idx].transform,
                                     isEnabled: !isDrawing, // Disable drag/pinch/rotate when drawing
-                                    onGestureEnd: {
-                                        // Debounce updates - only save after gesture completes
-                                        // Don't write to disk during drag for smoother performance
+                                    onGestureActivity: {
+                                        lastImageManipulationAt = Date()
+                                    },
+                                    onGestureEnd: { previous, new in
+                                        guard previous != new else { return }
+                                        // Record transform edits as an undoable action (single-step).
+                                        self.recordUndo(.transform(layerId: layer.id, previous: previous, new: new))
+                                        // Persist at gesture end for smooth interaction.
+                                        self.store.update(self.project)
                                     }
                                 ))
                                 .simultaneousGesture(
-                                    // Double tap - delete image (reversible with undo)
-                                    TapGesture(count: 2)
-                                        .onEnded {
-                                            if !isDrawing {
-                                                print("🗑️ Double tap detected - deleting image: \(layer.id)")
-                                                // Play two clicks for double tap
-                                                SoundEffectPlayer.shared.playClick()
-                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                                    SoundEffectPlayer.shared.playClick()
-                                                }
-                                                // Delay deletion to avoid gesture conflicts
-                                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                                    self.deleteImage(layer: layer)
-                                                }
+                                    // Long press - delete image (reversible with undo)
+                                    LongPressGesture(minimumDuration: 0.5)
+                                        .onEnded { _ in
+                                            guard !isDrawing else { return }
+                                            print("🗑️ Long press detected - deleting image: \(layer.id)")
+                                            
+                                            SoundEffectPlayer.shared.playClick()
+                                            let generator = UIImpactFeedbackGenerator(style: .medium)
+                                            generator.prepare()
+                                            generator.impactOccurred(intensity: 0.7)
+                                            
+                                            // Delay deletion to avoid gesture conflicts
+                                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                                self.deleteImage(layer: layer)
                                             }
                                         }
                                 )
@@ -1887,15 +2143,6 @@ struct CollageEditorView: View {
                                             }
                                         }
                                 )
-                                .simultaneousGesture(
-                                    LongPressGesture(minimumDuration: 0.5)
-                                        .onEnded { _ in
-                                            if !isDrawing {
-                                                print("⏱️ Long press detected!")
-                                                sendToBack(layer: layer)
-                                            }
-                                        }
-                                )
                                 .allowsHitTesting(!isDrawing) // Disable when drawing
                                 .zIndex(10)
                         }
@@ -1909,6 +2156,9 @@ struct CollageEditorView: View {
             .offset(x: project.imageLayers[idx].transform.x, y: project.imageLayers[idx].transform.y)
             .zIndex(Double(layer.zIndex))
             .id("\(layer.id)-\(layer.imageFileName)")
+            .applyIf(isCoachMarkTarget) { view in
+                view.editorCoachMarkTarget("editor.image")
+            }
         }
     }
     
@@ -2083,66 +2333,148 @@ struct CollageEditorView: View {
     // Handle Share button tap (top right) - saves state and immediately triggers export
     private func handleShareButtonTap() {
         print("📤 Share button clicked")
-        
-        // Save current drawing if active
-        if isDrawing {
-            handleDoneDrawing()
-        }
-        
-        // Save project state
-        store.update(project)
-        
-        // Reset tool state
-        selectedTool = .pen
-        isDrawing = false
-        
-        // Clear image selection
-        selectedImageId = nil
-        showToolbarForSelectedImage = false
+        guard !isExporting else { return }
         
         // Set export state immediately for visual feedback
         isExporting = true
         exportProgress = 0
         
-        // Trigger export immediately
-        Task {
-            await export()
+        let startExport: () -> Void = {
+            // Save project state
+            store.update(project)
+            
+            // Reset tool state
+            selectedTool = .pen
+            isDrawing = false
+            
+            // Clear selection
+            selectedImageId = nil
+            selectedTextId = nil
+            showToolbarForSelectedImage = false
+            showTextEditor = false
+            
+            // Trigger export
+            Task { await export() }
+        }
+        
+        // If drawing is active, ensure the drawing save finishes before exporting.
+        if isDrawing {
+            saveDrawingToProjectIfNeeded {
+                startExport()
+            }
+        } else {
+            startExport()
         }
     }
     
     // Save canvas-wide drawing when done (called from paint button or done button)
     private func handleDoneDrawing() {
-        guard isDrawing else { return }
+        saveDrawingToProjectIfNeeded {
+            // Save-only; do not exit drawing mode here.
+        }
+    }
+    
+    private func finishDrawingAndExit(onComplete: @escaping () -> Void = {}) {
+        saveDrawingToProjectIfNeeded {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                isDrawing = false
+                selectedTool = .pen
+            }
+            onComplete()
+        }
+    }
+    
+    private func saveDrawingToProjectIfNeeded(onComplete: @escaping () -> Void) {
+        guard isDrawing else {
+            onComplete()
+            return
+        }
+        guard !isFinishingDrawingSave else { return }
+        isFinishingDrawingSave = true
         
+        let dataSnapshot = drawingData
         let previousDrawingBase64 = project.drawingDataBase64
-        let base64 = drawingData.base64EncodedString()
-        let newBase64 = base64.isEmpty ? nil : base64
         
-        // Add to undo stack if drawing changed
-        if previousDrawingBase64 != newBase64 {
-            undoStack.append(.draw(previousDrawingBase64: previousDrawingBase64))
-            print("🎨 Added canvas drawing to undo stack")
+        Task.detached(priority: .userInitiated) {
+            let base64 = dataSnapshot.base64EncodedString()
+            let newBase64 = base64.isEmpty ? nil : base64
+            
+            await MainActor.run {
+                defer { isFinishingDrawingSave = false }
+                
+                // Add to undo stack if drawing changed
+                if previousDrawingBase64 != newBase64 {
+                    recordUndo(.draw(previousDrawingBase64: previousDrawingBase64))
+                    print("🎨 Added canvas drawing to undo stack")
+                }
+                
+                project.drawingDataBase64 = newBase64
+                store.update(project)
+                
+                // Keep in-memory state aligned with saved state (avoid re-decoding base64 on main).
+                drawingData = dataSnapshot
+                drawingHistory = [dataSnapshot]
+                drawingRedoData = nil
+                drawingStateBeforeEdit = nil
+                
+                onComplete()
+            }
         }
+    }
+
+    private func applyCanvasDrawing(base64: String?) {
+        // Base64 decode for drawings can be large; do it off-main to avoid UI stalls.
+        drawingApplyToken += 1
+        let token = drawingApplyToken
+        let base64Snapshot = base64
         
-        // Save the drawing
-        project.drawingDataBase64 = newBase64
-        store.update(project)
-        
-        // Update drawingData to match saved state
-        if let savedData = newBase64, let data = Data(base64Encoded: savedData) {
-            drawingData = data
-            drawingHistory = [data]
-        } else {
-            drawingData = Data()
-            drawingHistory = [Data()]
+        Task.detached(priority: .userInitiated) {
+            let decodedData: Data
+            if let b64 = base64Snapshot, let data = Data(base64Encoded: b64) {
+                decodedData = data
+            } else {
+                decodedData = Data()
+            }
+            
+            await MainActor.run {
+                guard drawingApplyToken == token else { return }
+                drawingData = decodedData
+                drawingHistory = [decodedData]
+                drawingRedoData = nil
+                pencilKitCanvasNonce += 1
+            }
         }
-        
-        drawingStateBeforeEdit = nil
-        print("🎨 Saved canvas drawing, data size: \(drawingData.count) bytes")
     }
 
     private func addTextLayer() {
         // Don't play click here - button already plays it
+        guard !showTextEditor else { return }
+
+        // If a text layer already exists, re-open the editor for the first one (single text model).
+        if project.textLayers.count > 1 {
+            let keep = project.textLayers[0]
+            project.textLayers = [keep]
+            store.update(project)
+        }
+        if let existing = project.textLayers.first {
+            // Delightful haptic feedback
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.prepare()
+            generator.impactOccurred(intensity: 0.7)
+            
+            selectedTextId = existing.id
+            editingText = existing.text
+            editingTextColor = Color(hex: existing.hexColor)
+            editingFontSize = existing.fontSize
+            
+            DispatchQueue.main.async {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    self.showTextEditor = true
+                }
+            }
+            print("✏️ Re-opening text editor for existing layer: \(existing.id)")
+            return
+        }
         
         // Delightful haptic feedback
         let generator = UIImpactFeedbackGenerator(style: .medium)
@@ -2159,7 +2491,7 @@ struct CollageEditorView: View {
             transform: .identity
         )
         project.textLayers.append(layer)
-        undoStack.append(.addText(layer: layer))
+        recordUndo(.addText(layer: layer, index: max(0, project.textLayers.count - 1)))
         selectedTextId = layer.id // Auto-select for editing
         editingText = ""
         editingTextColor = Color(hex: layer.hexColor)
@@ -2217,7 +2549,7 @@ struct CollageEditorView: View {
         print("🗑️ Deleting image at index \(idx)")
         
         // Add to undo stack before removing
-        undoStack.append(.deleteImage(layer: layer, index: idx))
+        recordUndo(.deleteImage(layer: layer, index: idx))
         
         // Remove from project
         project.imageLayers.remove(at: idx)
@@ -2243,7 +2575,7 @@ struct CollageEditorView: View {
         print("🗑️ Deleting text layer at index \(idx)")
         
         // Add to undo stack before removing
-        undoStack.append(.deleteText(layer: layer, index: idx))
+        recordUndo(.deleteText(layer: layer, index: idx))
         
         // Remove from project
         project.textLayers.remove(at: idx)
@@ -2267,7 +2599,7 @@ struct CollageEditorView: View {
         print("🗑️ Deleting canvas drawing")
         
         // Add to undo stack before removing
-        undoStack.append(.draw(previousDrawingBase64: currentDrawing))
+        recordUndo(.draw(previousDrawingBase64: currentDrawing))
         
         // Clear the drawing
         project.drawingDataBase64 = nil
@@ -2342,68 +2674,66 @@ struct CollageEditorView: View {
                 let backupFileName = "backup_\(UUID().uuidString).jpg"
                 let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
                 
-                // Save original image data to backup (before processing)
-                guard let originalData = try? Data(contentsOf: imageURL) else {
-                    print("❌ Failed to read original image data for backup")
-                    await MainActor.run {
-                        isRemovingBackground = false
-                    }
-                    return
-                }
+                // Save backup + processed image off-main to avoid UI stalls.
+                let layerFileName = layer.imageFileName
+                let projectId = project.id
+                let layerId = layer.id
+                let imageIdSnapshot = imageId
                 
-                do {
-                    // Save backup
-                    try originalData.write(to: backupURL)
-                    print("💾 Saved backup: \(backupFileName)")
+                Task.detached(priority: .userInitiated) {
+                    guard let originalData = try? Data(contentsOf: imageURL) else {
+                        print("❌ Failed to read original image data for backup")
+                        await MainActor.run { isRemovingBackground = false }
+                        return
+                    }
                     
-                    // Save the background-removed image (replace original)
-                    let fileName = layer.imageFileName
-                    let url = store.urlForProjectAsset(projectId: project.id, fileName: fileName)
+                    guard let processedData = processedImage.pngData() else {
+                        print("❌ Failed to get PNG data from processed image")
+                        await MainActor.run { isRemovingBackground = false }
+                        return
+                    }
                     
-                    if let data = processedImage.pngData() {
-                        try data.write(to: url)
-                        print("✅ Background removed and saved: \(fileName)")
+                    do {
+                        try originalData.write(to: backupURL)
+                        print("💾 Saved backup: \(backupFileName)")
+                        
+                        let url = store.urlForProjectAsset(projectId: projectId, fileName: layerFileName)
+                        try processedData.write(to: url)
+                        print("✅ Background removed and saved: \(layerFileName)")
                         
                         await MainActor.run {
+                            guard let currentIdx = project.imageLayers.firstIndex(where: { $0.id == layerId }) else {
+                                isRemovingBackground = false
+                                return
+                            }
+                            
                             // Clear cache FIRST to ensure fresh load (including metadata cache)
-                            imageCache.removeValue(forKey: layer.imageFileName)
-                            imageMetadataCache.removeValue(forKey: layer.imageFileName)
-                            updateCacheAccessOrder(for: layer.imageFileName)
+                            imageCache.removeValue(forKey: layerFileName)
+                            imageMetadataCache.removeValue(forKey: layerFileName)
+                            updateCacheAccessOrder(for: layerFileName)
                             
                             // Update the layer to use the new image
-                            project.imageLayers[idx].erasedImageFileName = nil // Clear erased version if any
-                            
-                            // Force view refresh by updating project (this will trigger SwiftUI to re-render)
+                            project.imageLayers[currentIdx].erasedImageFileName = nil // Clear erased version if any
                             store.update(project)
                             
                             // Add undo action
-                            let undoAction = UndoAction.removeBackground(layerId: layer.id, backupFileName: backupFileName)
-                            undoStack.append(undoAction)
+                            let undoAction = UndoAction.removeBackground(layerId: layerId, backupFileName: backupFileName)
+                            recordUndo(undoAction)
                             print("🔄 Added background removal to undo stack")
                             
                             isRemovingBackground = false
                             
                             // Clear selection to remove blue border after mask operation
-                            if selectedImageId == imageId {
+                            if selectedImageId == imageIdSnapshot {
                                 selectedImageId = nil
                                 showToolbarForSelectedImage = false
                                 print("🔄 Cleared selection after mask operation")
                             }
                         }
-                    } else {
-                        print("❌ Failed to get PNG data from processed image")
-                        // Clean up backup
+                    } catch {
+                        print("❌ Failed to save background-removed image: \(error)")
                         try? FileManager.default.removeItem(at: backupURL)
-                        await MainActor.run {
-                            isRemovingBackground = false
-                        }
-                    }
-                } catch {
-                    print("❌ Failed to save background-removed image: \(error)")
-                    // Clean up backup on error
-                    try? FileManager.default.removeItem(at: backupURL)
-                    await MainActor.run {
-                        isRemovingBackground = false
+                        await MainActor.run { isRemovingBackground = false }
                     }
                 }
             } else {
@@ -2424,165 +2754,269 @@ struct CollageEditorView: View {
             return
         }
         
-        // No need to check for done button state - share button doesn't have intermediate states
+        guard !isUndoRedoBusy else { return }
+        
+        // Second tap toggles to redo.
+        if redoBuffer != nil {
+            redoLastAction()
+            return
+        }
         
         print("🔄 Undo stack size: \(undoStack.count)")
         print("🔄 Undo stack contents: \(undoStack.map { String(describing: $0) })")
         
-        // Process actions in reverse order (most recent first)
-        // Allow undo for all actions including image add/delete
+        isPerformingUndoRedo = true
+        DispatchQueue.main.async {
+            self.isPerformingUndoRedo = false
+        }
+        
         guard let actionToUndo = undoStack.popLast() else {
             print("⚠️ No actions to undo")
             return
         }
         
+        var newRedo = RedoBuffer(action: actionToUndo)
+        
         print("🔄 Undoing action: \(actionToUndo)")
         switch actionToUndo {
-            case let .split(original, pieces):
-                // Remove the two pieces and restore original
-                project.imageLayers.removeAll { layer in
-                    pieces.contains(where: { $0.imageFileName == layer.imageFileName })
+        case let .split(original, pieces):
+            project.imageLayers.removeAll { layer in
+                pieces.contains(where: { $0.imageFileName == layer.imageFileName })
+            }
+            project.imageLayers.append(original)
+            store.update(project)
+            redoBuffer = newRedo
+            return
+            
+        case let .deleteImage(layer, index):
+            if index >= 0 && index <= project.imageLayers.count {
+                project.imageLayers.insert(layer, at: index)
+            } else {
+                project.imageLayers.append(layer)
+            }
+            store.update(project)
+            redoBuffer = newRedo
+            return
+            
+        case let .addImage(layer, _):
+            if let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
+                project.imageLayers.remove(at: idx)
+                if selectedImageId == layer.id {
+                    selectedImageId = nil
+                    showToolbarForSelectedImage = false
                 }
-                project.imageLayers.append(original)
                 store.update(project)
+            }
+            redoBuffer = newRedo
+            return
+            
+        case let .erase(layerId, previousFileName):
+            if let idx = layerIndexMap[layerId] {
+                newRedo.eraseRedoFileName = project.imageLayers[idx].erasedImageFileName
+                project.imageLayers[idx].erasedImageFileName = previousFileName
+                store.update(project)
+            }
+            redoBuffer = newRedo
+            return
+            
+        case let .draw(previousDrawingBase64):
+            newRedo.drawRedoBase64 = project.drawingDataBase64
+            
+            project.drawingDataBase64 = previousDrawingBase64
+            applyCanvasDrawing(base64: previousDrawingBase64)
+            store.update(project)
+            redoBuffer = newRedo
+            return
+            
+        case let .addText(layer, _):
+            project.textLayers.removeAll { $0.id == layer.id }
+            store.update(project)
+            redoBuffer = newRedo
+            return
+            
+        case let .deleteText(layer, index):
+            // Enforce single text layer.
+            project.textLayers = [layer]
+            store.update(project)
+            redoBuffer = newRedo
+            return
+            
+        case let .removeBackground(layerId, backupFileName):
+            guard let idx = layerIndexMap[layerId] else {
+                redoBuffer = newRedo
                 return
-            case let .deleteImage(layer, index):
-                // Restore the deleted image at its original index
-                // Use <= for insert to allow inserting at end (index == count)
+            }
+            
+            isUndoRedoBusy = true
+            
+            let layer = project.imageLayers[idx]
+            let projectId = project.id
+            let layerFileName = layer.imageFileName
+            let backupURL = store.urlForProjectAsset(projectId: projectId, fileName: backupFileName)
+            let originalURL = store.urlForProjectAsset(projectId: projectId, fileName: layerFileName)
+            
+            Task.detached(priority: .userInitiated) {
+                var redoProcessedFileName: String? = nil
+                
+                // Save current processed image so redo can re-apply it.
+                if FileManager.default.fileExists(atPath: originalURL.path),
+                   let processedData = try? Data(contentsOf: originalURL) {
+                    let name = "redo_bgrem_\(UUID().uuidString).png"
+                    let redoProcessedURL = store.urlForProjectAsset(projectId: projectId, fileName: name)
+                    try? processedData.write(to: redoProcessedURL)
+                    redoProcessedFileName = name
+                }
+                
+                // Restore original from backup (keep backup so undo works again after redo).
+                if FileManager.default.fileExists(atPath: backupURL.path),
+                   let backupData = try? Data(contentsOf: backupURL) {
+                    try? backupData.write(to: originalURL)
+                }
+                
+                await MainActor.run {
+                    newRedo.removeBackgroundProcessedFileName = redoProcessedFileName
+                    
+                    imageCache.removeValue(forKey: layerFileName)
+                    imageMetadataCache.removeValue(forKey: layerFileName)
+                    updateCacheAccessOrder(for: layerFileName)
+                    store.update(project)
+                    
+                    redoBuffer = newRedo
+                    isUndoRedoBusy = false
+                }
+            }
+            return
+            
+        case let .transform(layerId, previous, _):
+            if let idx = layerIndexMap[layerId] {
+                project.imageLayers[idx].transform = previous
+                store.update(project)
+            }
+            redoBuffer = newRedo
+            return
+        }
+    }
+    
+    private func redoLastAction() {
+        guard let redo = redoBuffer else { return }
+        guard !isUndoRedoBusy else { return }
+        
+        isPerformingUndoRedo = true
+        DispatchQueue.main.async {
+            self.isPerformingUndoRedo = false
+        }
+        
+        print("🔁 Redoing action: \(redo.action)")
+        
+        switch redo.action {
+        case let .split(original, pieces):
+            project.imageLayers.removeAll { $0.id == original.id }
+            project.imageLayers.append(contentsOf: pieces)
+            store.update(project)
+            
+        case let .addImage(layer, index):
+            if project.imageLayers.contains(where: { $0.id == layer.id }) == false {
                 if index >= 0 && index <= project.imageLayers.count {
                     project.imageLayers.insert(layer, at: index)
                 } else {
-                    // Invalid index, append instead
                     project.imageLayers.append(layer)
-                    print("⚠️ Invalid index \(index) for undo, appended instead")
-                }
-                // layerIndexMap is a computed property, so it will automatically rebuild
-                store.update(project)
-                print("🗑️ Restored deleted image")
-                return
-            case let .addImage(layer):
-                // Remove the added image
-                if let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
-                    project.imageLayers.remove(at: idx)
-                    
-                    // Clear selection if this was the selected image
-                    if selectedImageId == layer.id {
-                        selectedImageId = nil
-                        showToolbarForSelectedImage = false
-                    }
-                    
-                    // layerIndexMap is a computed property, so it will automatically rebuild
-                    store.update(project)
-                    print("🗑️ Removed added image via undo")
-                }
-                return
-            case let .erase(layerId, previousFileName):
-                // Restore previous erased state (or remove erasure)
-                if let idx = layerIndexMap[layerId] {
-                    project.imageLayers[idx].erasedImageFileName = previousFileName
-                    store.update(project)
-                    print("🧹 Undid erase on image: \(layerId)")
-                }
-                return
-                
-            case let .removeBackground(layerId, backupFileName):
-                // Restore original image from backup
-                if let idx = layerIndexMap[layerId] {
-                    let layer = project.imageLayers[idx]
-                    let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
-                    let originalURL = store.urlForProjectAsset(projectId: project.id, fileName: layer.imageFileName)
-                    
-                    // Restore original from backup
-                    if FileManager.default.fileExists(atPath: backupURL.path),
-                       let backupData = try? Data(contentsOf: backupURL) {
-                        do {
-                            try backupData.write(to: originalURL)
-                            print("🔄 Restored original image from backup: \(backupFileName)")
-                            
-                            // Clean up backup file
-                            try? FileManager.default.removeItem(at: backupURL)
-                            
-                            // Clear cache and metadata (including metadata cache)
-                            imageCache.removeValue(forKey: layer.imageFileName)
-                            imageMetadataCache.removeValue(forKey: layer.imageFileName)
-                            updateCacheAccessOrder(for: layer.imageFileName)
-                            store.update(project)
-                            print("🔄 Undid background removal")
-                        } catch {
-                            print("❌ Failed to restore original image: \(error)")
-                        }
-                    } else {
-                        print("⚠️ Backup file not found: \(backupFileName)")
-                    }
-                }
-                return
-                
-            case let .draw(previousDrawingBase64):
-                // Undo canvas-wide drawing (always canvas-wide, never image-specific)
-                    print("🎨 Before undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                    print("🎨 Restoring to: previousDrawingBase64 = \(previousDrawingBase64?.prefix(20) ?? "nil")")
-                    
-                    project.drawingDataBase64 = previousDrawingBase64
-                    if let data = previousDrawingBase64, let drawingData = Data(base64Encoded: data) {
-                        self.drawingData = drawingData
-                    drawingHistory = [drawingData]
-                        print("🎨 Restored drawing data: \(drawingData.count) bytes")
-                    } else {
-                        self.drawingData = Data()
-                    drawingHistory = [Data()]
-                        print("🎨 Cleared drawing data (no previous drawing)")
-                    }
-                    
-                    // Update store AFTER setting the data
-                    store.update(project)
-                    
-                    print("🎨 After undo: project.drawingDataBase64 = \(project.drawingDataBase64?.prefix(20) ?? "nil")")
-                print("🎨 Undid canvas drawing - drawing data now: \(self.drawingData.count) bytes")
-                return
-            case let .addText(layer):
-                // Remove the added text
-                project.textLayers.removeAll { $0.id == layer.id }
-                store.update(project)
-                print("✏️ Undid text addition")
-                return
-            case let .deleteText(layer, index):
-                // Restore the deleted text at its original index
-                // Use <= for insert to allow inserting at end (index == count)
-                if index >= 0 && index <= project.textLayers.count {
-                    project.textLayers.insert(layer, at: index)
-                } else {
-                    // Invalid index, append instead
-                    project.textLayers.append(layer)
-                    print("⚠️ Invalid index \(index) for undo, appended instead")
                 }
                 store.update(project)
-                print("✏️ Restored deleted text")
-                return
-            case .addImage(_):
-                // This should never reach here as we filter out addImage actions above
-                // Images can only be deleted by double-tapping, not via undo
-                print("⚠️ addImage action reached switch (should have been filtered)")
-                return
-        }
-        // fallback legacy undo if no recorded action
-        // Priority: erase/text/drawing/remove image
-        if selectedTool == .erase {
-            if let idx = project.imageLayers.lastIndex(where: { $0.erasedImageFileName != nil }) {
-                if let name = project.imageLayers[idx].erasedImageFileName {
-                    let url = store.urlForProjectAsset(projectId: project.id, fileName: name)
-                    try? FileManager.default.removeItem(at: url)
-                }
-                project.imageLayers[idx].erasedImageFileName = nil
             }
-        } else if !project.textLayers.isEmpty {
-            project.textLayers.removeLast()
-        } else if project.drawingDataBase64 != nil && !project.drawingDataBase64!.isEmpty {
-            project.drawingDataBase64 = nil
-            drawingData = Data()
-        } else if !project.imageLayers.isEmpty {
-            _ = project.imageLayers.removeLast()
+            
+        case let .deleteImage(layer, _):
+            if let idx = project.imageLayers.firstIndex(where: { $0.id == layer.id }) {
+                project.imageLayers.remove(at: idx)
+                if selectedImageId == layer.id {
+                    selectedImageId = nil
+                    showToolbarForSelectedImage = false
+                }
+                store.update(project)
+            }
+            
+        case let .erase(layerId, _):
+            if let idx = layerIndexMap[layerId] {
+                project.imageLayers[idx].erasedImageFileName = redo.eraseRedoFileName
+                store.update(project)
+            }
+            
+        case .draw:
+            project.drawingDataBase64 = redo.drawRedoBase64
+            applyCanvasDrawing(base64: redo.drawRedoBase64)
+            store.update(project)
+            
+        case let .addText(layer, index):
+            // Enforce single text layer.
+            project.textLayers = [layer]
+            store.update(project)
+            
+        case let .deleteText(layer, _):
+            project.textLayers.removeAll { $0.id == layer.id }
+            store.update(project)
+            
+        case let .removeBackground(layerId, _):
+            guard let idx = layerIndexMap[layerId] else { break }
+            guard let processedFileName = redo.removeBackgroundProcessedFileName else { break }
+            
+            isUndoRedoBusy = true
+            
+            let layer = project.imageLayers[idx]
+            let projectId = project.id
+            let layerFileName = layer.imageFileName
+            let originalURL = store.urlForProjectAsset(projectId: projectId, fileName: layerFileName)
+            let processedURL = store.urlForProjectAsset(projectId: projectId, fileName: processedFileName)
+            
+            Task.detached(priority: .userInitiated) {
+                if FileManager.default.fileExists(atPath: processedURL.path),
+                   let processedData = try? Data(contentsOf: processedURL) {
+                    try? processedData.write(to: originalURL)
+                }
+                
+                // Clean up the redo temp file (backup stays for potential undo).
+                try? FileManager.default.removeItem(at: processedURL)
+                
+                await MainActor.run {
+                    imageCache.removeValue(forKey: layerFileName)
+                    imageMetadataCache.removeValue(forKey: layerFileName)
+                    updateCacheAccessOrder(for: layerFileName)
+                    store.update(project)
+                    
+                    // After redo, the same action becomes undoable again (single-step).
+                    undoStack = [redo.action]
+                    redoBuffer = nil
+                    isUndoRedoBusy = false
+                }
+            }
+            return
+            
+        case let .transform(layerId, _, new):
+            if let idx = layerIndexMap[layerId] {
+                project.imageLayers[idx].transform = new
+                store.update(project)
+            }
         }
-        store.update(project)
+        
+        // After redo, the same action becomes undoable again (single-step).
+        undoStack = [redo.action]
+        redoBuffer = nil
+    }
+    
+    private func clearRedoBuffer(deleteBackupForRemoveBackground: Bool) {
+        guard let redo = redoBuffer else { return }
+        
+        if case let .removeBackground(_, backupFileName) = redo.action {
+            if let processed = redo.removeBackgroundProcessedFileName {
+                let processedURL = store.urlForProjectAsset(projectId: project.id, fileName: processed)
+                try? FileManager.default.removeItem(at: processedURL)
+            }
+            
+            if deleteBackupForRemoveBackground {
+                let backupURL = store.urlForProjectAsset(projectId: project.id, fileName: backupFileName)
+                try? FileManager.default.removeItem(at: backupURL)
+            }
+        }
+        
+        redoBuffer = nil
     }
 
     private func startRecording() {
@@ -2616,8 +3050,17 @@ struct CollageEditorView: View {
         
         do {
             print("🎬 Step 1: Rendering collage image...")
-            // Render the collage image
-            guard let collageImage = CollageRenderer.render(project: project, assetURLProvider: assetURL) else {
+            // Render off-main to avoid UI freezes.
+            let size = await MainActor.run { UIScreen.main.bounds.size }
+            let scale = await MainActor.run { UIScreen.main.scale }
+            let projectSnapshot = project
+            let collageImage = await CollageRenderer.renderAsync(
+                project: projectSnapshot,
+                assetURLProvider: assetURL,
+                canvasSize: size,
+                screenScale: scale
+            )
+            guard let collageImage else {
                 print("❌ Failed to render collage")
                 await MainActor.run {
                     exportError = "Failed to render collage image"
@@ -3139,7 +3582,7 @@ struct CollageEditorView: View {
         print("✂️ SPLIT: Adding two new layers")
         
         // Push undo action BEFORE mutating store further
-        undoStack.append(.split(original: originalLayer, pieces: [topLayer, bottomLayer]))
+        recordUndo(.split(original: originalLayer, pieces: [topLayer, bottomLayer]))
         
         // Add both new layers
         project.imageLayers.append(topLayer)
@@ -3191,6 +3634,7 @@ private struct ScaleButtonStyle: ButtonStyle {
 }
 
 private struct TextEditorOverlay: View {
+    @Binding var isShowing: Bool
     @Binding var text: String
     @Binding var textColor: Color
     @Binding var fontSize: Double
@@ -3199,12 +3643,15 @@ private struct TextEditorOverlay: View {
     @FocusState private var isFocused: Bool
     
     @State private var isPresented = false
+    @State private var keyboardOverlap: CGFloat = 0
     
     var body: some View {
         ZStack {
             backdropView
             panelView
         }
+        // Overlay controls its own visibility via `isShowing`, so it should never get "stuck".
+        .allowsHitTesting(true)
         .onAppear {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 isPresented = true
@@ -3214,6 +3661,18 @@ private struct TextEditorOverlay: View {
             try? await Task.sleep(nanoseconds: 50_000_000)
             isFocused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let overlap = max(0, UIScreen.main.bounds.height - frame.minY)
+            withAnimation(.easeOut(duration: 0.18)) {
+                keyboardOverlap = overlap
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.18)) {
+                keyboardOverlap = 0
+            }
+        }
     }
     
     private var backdropView: some View {
@@ -3221,12 +3680,10 @@ private struct TextEditorOverlay: View {
             .ignoresSafeArea()
             .animation(.easeOut(duration: 0.2), value: isPresented)
             .onTapGesture {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    isPresented = false
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    onCancel()
-                }
+                dismissKeyboard()
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isPresented = false }
+                isShowing = false
+                DispatchQueue.main.async { onCancel() }
             }
     }
     
@@ -3249,7 +3706,7 @@ private struct TextEditorOverlay: View {
         .background(panelBackground)
         .frame(maxWidth: 420)
         .padding(.horizontal, 20)
-        .padding(.bottom, 30)
+        .padding(.bottom, 30 + keyboardOverlap)
         .scaleEffect(isPresented ? 1.0 : 0.8)
         .opacity(isPresented ? 1.0 : 0.0)
         .offset(y: isPresented ? 0 : 20)
@@ -3338,32 +3795,30 @@ private struct TextEditorOverlay: View {
     
     private func handleSubmit() {
         SoundEffectPlayer.shared.playClick()
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            isPresented = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            onDone()
-        }
+        dismissKeyboard()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isPresented = false }
+        isShowing = false
+        DispatchQueue.main.async { onDone() }
     }
     
     private func handleDone() {
         SoundEffectPlayer.shared.playClick()
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            isPresented = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            onDone()
-        }
+        dismissKeyboard()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isPresented = false }
+        isShowing = false
+        DispatchQueue.main.async { onDone() }
     }
     
     private func handleCancel() {
         SoundEffectPlayer.shared.playClick()
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-            isPresented = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            onCancel()
-        }
+        dismissKeyboard()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { isPresented = false }
+        isShowing = false
+        DispatchQueue.main.async { onCancel() }
+    }
+    
+    private func dismissKeyboard() {
+        isFocused = false
     }
 }
 
@@ -3380,27 +3835,22 @@ private struct TransformableText: View {
     var onTextChange: (String) -> Void
 
     var body: some View {
-        ZStack {
-            // Text content with delightful selection animation
-            Text(text)
-                .font(.custom(fontName, size: CGFloat(fontSize)))
-                .foregroundStyle(color)
-                .padding(8)
-                .background(Color.black.opacity(0.3))
-                .cornerRadius(6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(isSelected ? Color.blue : Color.clear, lineWidth: isSelected ? 2 : 0)
-                        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
-                )
-                .scaleEffect(isSelected ? 1.02 : 1.0)
-                .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
-            
-            // Gesture overlay - covers entire text area for reliable gesture recognition
-            Color.clear
-                .contentShape(Rectangle())
-                .frame(maxWidth: .infinity, maxHeight: .infinity) // Fill entire ZStack
-        }
+        // IMPORTANT: keep the hit-test area tight to the text chip.
+        // A full-screen transparent overlay here will block selecting images.
+        Text(text)
+            .font(.custom(fontName, size: CGFloat(fontSize)))
+            .foregroundStyle(color)
+            .padding(8)
+            .background(Color.black.opacity(0.3))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isSelected ? Color.blue : Color.clear, lineWidth: isSelected ? 2 : 0)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
+            )
+            .contentShape(Rectangle())
+            .scaleEffect(isSelected ? 1.02 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
         .modifier(TransformModifier(transform: $transform, isEnabled: true))
         .simultaneousGesture(
             // Long press to delete
@@ -3433,8 +3883,10 @@ private struct TransformModifier: ViewModifier {
     @State private var lastScale: Double = 1.0
     @State private var lastRotation: Double = 0.0
     @State private var hasInitialized = false
+    @State private var isGesturing = false
     var isEnabled: Bool = true // Enable/disable gestures
-    var onGestureEnd: (() -> Void)?
+    var onGestureActivity: (() -> Void)? = nil
+    var onGestureEnd: ((Transform2D, Transform2D) -> Void)?
 
     func body(content: Content) -> some View {
         if isEnabled {
@@ -3447,6 +3899,14 @@ private struct TransformModifier: ViewModifier {
                     if !hasInitialized {
                         initializeState()
                     }
+                }
+                .onChange(of: transform) { newValue in
+                    // Keep internal gesture baselines synced when transform changes programmatically
+                    // (e.g. undo/redo). Rotation is especially sensitive to stale baselines.
+                    guard hasInitialized, !isGesturing else { return }
+                    lastOffset = CGSize(width: newValue.x, height: newValue.y)
+                    lastScale = newValue.scale
+                    lastRotation = newValue.rotation
                 }
         } else {
             content
@@ -3466,6 +3926,12 @@ private struct TransformModifier: ViewModifier {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                isGesturing = true
+                // Only treat as "manipulation" after a small movement threshold.
+                // This avoids blocking double-tap delete due to normal tap jitter.
+                if hypot(value.translation.width, value.translation.height) > 6 {
+                    onGestureActivity?()
+                }
                 // Rotate the translation vector to account for the current rotation
                 // This ensures drag direction matches the visual orientation of the rotated view
                 // We rotate by -rotation to convert from screen space to the view's local coordinate space
@@ -3484,40 +3950,59 @@ private struct TransformModifier: ViewModifier {
                 transform.y = rotatedY + lastOffset.height
             }
             .onEnded { value in
+                let previous = Transform2D(x: lastOffset.width, y: lastOffset.height, scale: lastScale, rotation: lastRotation)
+                let new = transform
+                onGestureEnd?(previous, new)
                 lastOffset = CGSize(width: transform.x, height: transform.y)
-                onGestureEnd?()
+                isGesturing = false
             }
     }
 
     private var magnification: some Gesture {
         MagnificationGesture(minimumScaleDelta: 0)
             .onChanged { scale in
+                isGesturing = true
+                // Only treat as manipulation once user actually pinches.
+                if abs(scale - 1.0) > 0.01 {
+                    onGestureActivity?()
+                }
                 // Direct assignment for immediate response
                 let newScale = lastScale * scale
                 transform.scale = max(0.1, min(15.0, newScale))  // Allow 10% to 1500% (15x zoom)
             }
             .onEnded { scale in
+                let previous = Transform2D(x: lastOffset.width, y: lastOffset.height, scale: lastScale, rotation: lastRotation)
+                let new = transform
+                onGestureEnd?(previous, new)
                 lastScale = transform.scale
+                isGesturing = false
                 // Delightful haptic feedback on pinch end
                 let generator = UIImpactFeedbackGenerator(style: .light)
                 generator.prepare()
                 generator.impactOccurred(intensity: 0.5)
-                onGestureEnd?()
             }
     }
 
     private var rotation: some Gesture {
         RotationGesture()
             .onChanged { angle in
+                isGesturing = true
+                // Only treat as manipulation once user actually rotates.
+                if abs(angle.radians) > 0.02 {
+                    onGestureActivity?()
+                }
                 transform.rotation = lastRotation + angle.radians
             }
             .onEnded { angle in
+                let previous = Transform2D(x: lastOffset.width, y: lastOffset.height, scale: lastScale, rotation: lastRotation)
+                let new = transform
+                onGestureEnd?(previous, new)
                 lastRotation = transform.rotation
+                isGesturing = false
                 // Delightful haptic feedback on rotation end
                 let generator = UIImpactFeedbackGenerator(style: .light)
                 generator.prepare()
                 generator.impactOccurred(intensity: 0.5)
-                onGestureEnd?()
             }
     }
 }
@@ -3820,6 +4305,17 @@ private class BackgroundImageView: UIView {
         
         print("❌ Failed to load background image from any source: \(nameWithExt)")
         return nil
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func applyIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }
 

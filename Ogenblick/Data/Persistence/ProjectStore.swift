@@ -4,7 +4,9 @@ import SwiftUI
 final class ProjectStore: ObservableObject {
     @Published var projects: [Project] = [] {
         didSet { 
-            // Save asynchronously to avoid blocking main thread
+            // Save asynchronously to avoid blocking main thread.
+            // Avoid writing immediately while we're loading from disk.
+            guard !isLoadingFromDisk else { return }
             saveAsync()
         }
     }
@@ -13,9 +15,11 @@ final class ProjectStore: ObservableObject {
     private let indexFileName = "projects.json"
     private let saveQueue = DispatchQueue(label: "com.ogenblick.projectstore.save", qos: .utility)
     private var saveWorkItem: DispatchWorkItem?
+    private let loadQueue = DispatchQueue(label: "com.ogenblick.projectstore.load", qos: .utility)
+    private var isLoadingFromDisk: Bool = false
 
     init() {
-        load()
+        loadAsync()
     }
 
     // MARK: - Public API
@@ -64,14 +68,29 @@ final class ProjectStore: ObservableObject {
         documentsRoot().appendingPathComponent(indexFileName)
     }
 
-    private func load() {
-        do {
-            let url = indexURL()
-            let data = try Data(contentsOf: url)
-            let decoded = try JSONDecoder().decode([Project].self, from: data)
-            self.projects = decoded
-        } catch {
-            self.projects = []
+    private func loadAsync() {
+        isLoadingFromDisk = true
+        let url = indexURL()
+        
+        loadQueue.async { [weak self] in
+            guard let self else { return }
+            
+            let decoded: [Project]
+            do {
+                if FileManager.default.fileExists(atPath: url.path) == false {
+                    decoded = []
+                } else {
+                    let data = try Data(contentsOf: url)
+                    decoded = try JSONDecoder().decode([Project].self, from: data)
+                }
+            } catch {
+                decoded = []
+            }
+            
+            DispatchQueue.main.async {
+                self.projects = decoded
+                self.isLoadingFromDisk = false
+            }
         }
     }
 

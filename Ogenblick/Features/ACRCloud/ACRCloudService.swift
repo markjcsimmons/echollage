@@ -3,7 +3,7 @@ import AVFoundation
 import CommonCrypto
 
 struct ACRCloudService {
-    static func recognizeMusic(fromAudioAt url: URL) async throws -> MusicMetadata? {
+    static func recognizeMusic(fromAudioAt url: URL, requestTimeoutSeconds: TimeInterval = 3.0) async throws -> MusicMetadata? {
         // Load credentials from Secrets.plist
         guard let secretsPath = Bundle.main.path(forResource: "Secrets", ofType: "plist"),
               let secretsDict = NSDictionary(contentsOfFile: secretsPath),
@@ -17,13 +17,10 @@ struct ACRCloudService {
         
         print("🎵 ACRCloudService: Starting music recognition")
         
-        // Extract a short sample from the audio (first 5 seconds, ACRCloud recommends 5-10 seconds)
-        // Reduced to 5 seconds for faster uploads while maintaining recognition accuracy
-        // ACRCloud requires WAV/PCM format for reliable fingerprinting
-        guard let audioSample = try? await extractAudioSampleAsWAV(from: url, maxDuration: 5.0) else {
-            print("❌ ACRCloudService: Failed to extract audio sample")
-            return nil
-        }
+        // Extract a short sample from the audio (first 5 seconds).
+        // This can occasionally fail if the recording file is still being finalized,
+        // so we retry briefly before treating it as "no match".
+        let audioSample = try await extractAudioSampleAsWAVWithRetries(from: url, maxDuration: 5.0)
         
         // Prepare the request
         let timestamp = String(Int(Date().timeIntervalSince1970))
@@ -101,12 +98,14 @@ struct ACRCloudService {
         
         // Create URLSession with timeout configuration
         let sessionConfig = URLSessionConfiguration.default
-        sessionConfig.timeoutIntervalForRequest = 3.0 // 3 second timeout - quick response
-        sessionConfig.timeoutIntervalForResource = 3.0 // 3 second timeout - quick response
+        sessionConfig.timeoutIntervalForRequest = requestTimeoutSeconds
+        sessionConfig.timeoutIntervalForResource = requestTimeoutSeconds
+        sessionConfig.waitsForConnectivity = false
         let session = URLSession(configuration: sessionConfig)
         
         // Send the request with timeout
         do {
+            request.timeoutInterval = requestTimeoutSeconds
             let (data, response) = try await session.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -194,28 +193,22 @@ struct ACRCloudService {
             )
             
         } catch {
-            // Provide more specific error messages
-            let errorMessage: String
             if let urlError = error as? URLError {
                 switch urlError.code {
                 case .timedOut:
-                    errorMessage = "Unable to identify music"
-                    print("❌ ACRCloudService: Request timed out after 3 seconds")
+                    print("❌ ACRCloudService: Request timed out after \(requestTimeoutSeconds)s")
                 case .notConnectedToInternet:
-                    errorMessage = "No internet connection. Please check your network settings."
                     print("❌ ACRCloudService: No internet connection")
                 case .networkConnectionLost:
-                    errorMessage = "Network connection lost. Please try again."
                     print("❌ ACRCloudService: Network connection lost")
                 default:
-                    errorMessage = "Network error: \(urlError.localizedDescription)"
                     print("❌ ACRCloudService: Request failed with URLError: \(urlError.localizedDescription)")
                 }
-            } else {
-                errorMessage = "Recognition failed: \(error.localizedDescription)"
-                print("❌ ACRCloudService: Request failed: \(error.localizedDescription)")
+                throw urlError
             }
-            throw NSError(domain: "ACRCloudService", code: -100, userInfo: [NSLocalizedDescriptionKey: errorMessage])
+            
+            print("❌ ACRCloudService: Request failed: \(error.localizedDescription)")
+            throw error
         }
     }
     
@@ -390,6 +383,43 @@ struct ACRCloudService {
         print("🎵 ACRCloudService: Successfully extracted \(pcmData.count) bytes PCM, created \(wavData.count) bytes (\(wavData.count / 1024) KB) WAV file")
         
         return wavData
+    }
+
+    private static func extractAudioSampleAsWAVWithRetries(from url: URL, maxDuration: Double) async throws -> Data {
+        // Quick retries to handle "file not finalized yet" or transient AVFoundation read hiccups.
+        let delaysNs: [UInt64] = [0, 200_000_000, 350_000_000] // 0ms, 200ms, 350ms
+        var lastError: Error?
+        
+        for (attempt, delay) in delaysNs.enumerated() {
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+            
+            do {
+                let wav = try await extractAudioSampleAsWAV(from: url, maxDuration: maxDuration)
+                if wav.count > 44 {
+                    if attempt > 0 {
+                        print("✅ ACRCloudService: Sample extraction succeeded on retry attempt \(attempt + 1)")
+                    }
+                    return wav
+                } else {
+                    throw NSError(
+                        domain: "ACRCloudService",
+                        code: -20,
+                        userInfo: [NSLocalizedDescriptionKey: "WAV sample too small (\(wav.count) bytes)"]
+                    )
+                }
+            } catch {
+                lastError = error
+                print("⚠️ ACRCloudService: Sample extraction attempt \(attempt + 1) failed: \(error.localizedDescription)")
+            }
+        }
+        
+        throw lastError ?? NSError(
+            domain: "ACRCloudService",
+            code: -21,
+            userInfo: [NSLocalizedDescriptionKey: "Failed to extract audio sample"]
+        )
     }
     
     // Create WAV file from PCM data (ACRCloud requires WAV format with proper headers)

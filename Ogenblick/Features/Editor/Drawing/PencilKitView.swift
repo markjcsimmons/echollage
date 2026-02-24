@@ -40,9 +40,23 @@ struct PencilKitView: UIViewRepresentable {
         // Update drawing if data changed externally (e.g., undo)
         let currentDrawing = uiView.drawing.dataRepresentation()
         if currentDrawing != drawingData {
+            // If PencilKit is actively producing updates (user is mid-stroke),
+            // do NOT try to "pull" state back from SwiftUI. This can fight with
+            // PencilKit's own updates and make undo/redo appear inconsistent.
+            if context.coordinator.isDrawingStroke {
+                return
+            }
+            
             print("🎨 PencilKitView: Drawing data changed externally, updating canvas")
             if let newDrawing = try? PKDrawing(data: drawingData) {
+                // Prevent delegate callbacks from firing during programmatic updates
+                // (these can otherwise interfere with undo/redo state).
+                context.coordinator.isProgrammaticUpdate = true
+                context.coordinator.resetStrokeTracking()
                 uiView.drawing = newDrawing
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    context.coordinator.isProgrammaticUpdate = false
+                }
                 print("🎨 Canvas updated with new drawing, size: \(drawingData.count) bytes")
             }
         }
@@ -74,14 +88,46 @@ struct PencilKitView: UIViewRepresentable {
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         @Binding var drawingData: Data
         var onDrawingChanged: ((Data) -> Void)?
-        private var isDrawingStroke = false
+        fileprivate(set) var isDrawingStroke = false
+        var isProgrammaticUpdate: Bool = false
+        private var strokeEndWorkItem: DispatchWorkItem? = nil
+        private let strokeEndDebounceSeconds: TimeInterval = 0.18
         
         init(drawingData: Binding<Data>, onDrawingChanged: ((Data) -> Void)?) { 
             _drawingData = drawingData 
             self.onDrawingChanged = onDrawingChanged
         }
+        
+        private func scheduleStrokeEndDebounce(for canvasView: PKCanvasView) {
+            strokeEndWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self, weak canvasView] in
+                guard let self, let canvasView else { return }
+                self.finishStrokeIfNeeded(canvasView)
+            }
+            strokeEndWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + strokeEndDebounceSeconds, execute: work)
+        }
+        
+        private func finishStrokeIfNeeded(_ canvasView: PKCanvasView) {
+            if isProgrammaticUpdate { return }
+            guard isDrawingStroke else { return }
+            
+            let newData = canvasView.drawing.dataRepresentation()
+            onDrawingChanged?(newData)
+            isDrawingStroke = false
+            strokeEndWorkItem?.cancel()
+            strokeEndWorkItem = nil
+            print("🎨 Stroke finished (debounced), saved to history, data size: \(newData.count)")
+        }
+        
+        func resetStrokeTracking() {
+            isDrawingStroke = false
+            strokeEndWorkItem?.cancel()
+            strokeEndWorkItem = nil
+        }
 
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            if isProgrammaticUpdate { return }
             let newData = canvasView.drawing.dataRepresentation()
             
             // Track if we're actively drawing
@@ -91,25 +137,25 @@ struct PencilKitView: UIViewRepresentable {
             }
             
             drawingData = newData
+            // Debounced stroke-end detection for cases where PencilKit doesn't reliably call
+            // canvasViewDidEndUsingTool (or when it arrives late).
+            scheduleStrokeEndDebounce(for: canvasView)
         }
         
         // This is called when drawing interaction ends (finger lifted)
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+            if isProgrammaticUpdate { return }
+            // Finish immediately (and cancel debounce) when we get the proper callback.
             print("🎨 canvasViewDidEndUsingTool called!")
-            let newData = canvasView.drawing.dataRepresentation()
-            onDrawingChanged?(newData) // Save to history when stroke completes
-            isDrawingStroke = false
-            print("🎨 Stroke completed, saved to history, data size: \(newData.count)")
+            finishStrokeIfNeeded(canvasView)
         }
         
         // Fallback: also check when drawing ends if the delegate method doesn't fire
         func canvasViewDidFinishRendering(_ canvasView: PKCanvasView) {
-            if isDrawingStroke {
-                print("🎨 canvasViewDidFinishRendering - stroke finished via fallback")
-                let newData = canvasView.drawing.dataRepresentation()
-                onDrawingChanged?(newData)
-                isDrawingStroke = false
-            }
+            if isProgrammaticUpdate { return }
+            guard isDrawingStroke else { return }
+            print("🎨 canvasViewDidFinishRendering - stroke finished via fallback")
+            finishStrokeIfNeeded(canvasView)
         }
     }
 }
