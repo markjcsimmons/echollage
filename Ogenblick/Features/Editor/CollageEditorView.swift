@@ -56,6 +56,7 @@ struct CollageEditorView: View {
         case deleteImage(layer: ImageLayer, index: Int)
         case erase(layerId: UUID, previousFileName: String?)
         case draw(previousDrawingBase64: String?) // Canvas-wide drawing only (no layerId needed)
+        case eraseCanvas(previousEraseBase64: String?) // Canvas-level erase mask
         case addText(layer: TextLayer, index: Int)
         case deleteText(layer: TextLayer, index: Int)
         case removeBackground(layerId: UUID, backupFileName: String)
@@ -68,6 +69,7 @@ struct CollageEditorView: View {
         let action: UndoAction
         var drawRedoBase64: String? = nil
         var eraseRedoFileName: String? = nil
+        var eraseCanvasRedoBase64: String? = nil
         var removeBackgroundProcessedFileName: String? = nil
     }
     @State private var redoBuffer: RedoBuffer? = nil
@@ -138,6 +140,13 @@ struct CollageEditorView: View {
     // Store drawing history for undo (per-image)
     @State private var drawingHistory: [Data] = []
     @State private var drawingStateBeforeEdit: String? = nil // Capture state when starting to draw (for canvas drawing only)
+    @State private var isPaintErasing: Bool = false // Eraser mode within paint toolbar
+    @State private var eraseDrawingData: Data = Data() // In-memory erase mask buffer
+    @State private var isCanvasErasing: Bool = false // Erase tool active
+    @State private var eraseHistory: [Data] = [] // Stroke-level history for erase undo
+    @State private var eraseRedoData: Data? = nil
+    @State private var isFinishingEraseSave: Bool = false
+    @State private var stableCanvasSize: CGSize = .zero // Cached canvas size to prevent resize on draw mode toggle
     // Removed: currentDrawingImageId - drawing is always canvas-wide
     
     // Dynamic background based on project backgroundType
@@ -392,9 +401,10 @@ struct CollageEditorView: View {
             shareButtonOverlay
             audioButtonOverlay
             drawingControlsOverlay
+            eraseControlsOverlay
         }
     }
-    
+
     private var backgroundLayer: some View {
         backgroundView
             .ignoresSafeArea(.all)
@@ -599,8 +609,35 @@ struct CollageEditorView: View {
     }
     
     @ViewBuilder
+    @ViewBuilder
+    private var eraseControlsOverlay: some View {
+        if isCanvasErasing {
+            VStack {
+                Spacer()
+                Button {
+                    SoundEffectPlayer.shared.playClick()
+                    finishEraseAndExit()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 44, height: 44)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 18)
+                        .fill(.ultraThinMaterial)
+                        .shadow(color: Color.black.opacity(0.3), radius: 20, y: 10)
+                )
+                .padding(.bottom, 30)
+                .padding(.horizontal, 16)
+            }
+            .transition(.move(edge: .bottom))
+        }
+    }
+
     private var drawingControlsOverlay: some View {
-        if isDrawing {
+        if isDrawing && !isCanvasErasing {
             VStack {
                 Spacer()
                 drawingControlsBar
@@ -651,21 +688,33 @@ struct CollageEditorView: View {
                     SoundEffectPlayer.shared.playClick()
                     withAnimation(.easeOut(duration: 0.15)) {
                         strokeColor = color
+                        isPaintErasing = false
                     }
                 } label: {
                     Circle()
                         .fill(color)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 30, height: 30)
                         .overlay(
                             Circle()
-                                .stroke(strokeColor == color ? Color.white : Color.white.opacity(0.3),
-                                        lineWidth: strokeColor == color ? 2.5 : 1)
+                                .stroke(!isPaintErasing && strokeColor == color ? Color.white : Color.white.opacity(0.3),
+                                        lineWidth: !isPaintErasing && strokeColor == color ? 2.5 : 1)
                         )
-                        .shadow(color: strokeColor == color ? color.opacity(0.6) : Color.black.opacity(0.25),
-                                radius: strokeColor == color ? 4 : 2,
+                        .shadow(color: !isPaintErasing && strokeColor == color ? color.opacity(0.6) : Color.black.opacity(0.25),
+                                radius: !isPaintErasing && strokeColor == color ? 4 : 2,
                                 y: 2)
-                        .scaleEffect(strokeColor == color ? 1.1 : 1.0)
+                        .scaleEffect(!isPaintErasing && strokeColor == color ? 1.1 : 1.0)
                 }
+            }
+
+            // Close paint mode
+            Button {
+                SoundEffectPlayer.shared.playClick()
+                finishDrawingAndExit()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
             }
         }
         .padding(8)
@@ -909,6 +958,7 @@ struct CollageEditorView: View {
     private var canvasView: some View {
         GeometryReader { geometry in
             let canvasSize = geometry.size
+            let imageLayoutSize = stableCanvasSize != .zero ? stableCanvasSize : canvasSize
             ZStack {
                 // Always transparent to show corkboard background
                 // Note: When paint is active, tapping background (above) will deselect paint
@@ -931,11 +981,11 @@ struct CollageEditorView: View {
                                 }
                             }
                     )
-                
+
                 ForEach(sortedImageLayers) { layer in
                     imageLayerView(
                         for: layer,
-                        canvasSize: canvasSize,
+                        canvasSize: imageLayoutSize,
                         isCoachMarkTarget: layer.id == sortedImageLayers.first?.id
                     )
                 }
@@ -998,7 +1048,7 @@ struct CollageEditorView: View {
                         PencilKitView(
                             drawingData: $drawingData,
                             isDrawingEnabled: true,
-                        isEraseMode: selectedTool == .erase, // Enable erase mode when erase tool is selected
+                        isEraseMode: isPaintErasing, // Enable eraser within paint toolbar
                             strokeColor: strokeColor,
                             strokeWidth: strokeWidth,
                         expectedSize: canvasSize, // CRITICAL: Pass expected size for bounds matching
@@ -1044,20 +1094,51 @@ struct CollageEditorView: View {
                            .zIndex(1000)
                        }
                        
-                       // Erase gesture overlay when image is selected and erase tool active (but NOT when drawing canvas-wide)
-                       // When drawing is active, use PencilKit erase mode instead
-                       if selectedTool == .erase && selectedImageId != nil && !isDrawing {
-                           PressureSensitiveEraseOverlay(
-                               selectedImageId: selectedImageId,
-                               project: $project,
-                               undoStack: $undoStack,
-                               store: store,
-                               brushSize: strokeWidth * 3
+                       // Saved erase mask — renders with destinationOut to punch holes through canvas content
+                       if !isCanvasErasing && !eraseDrawingData.isEmpty {
+                           PencilKitView(
+                               drawingData: .constant(eraseDrawingData),
+                               isDrawingEnabled: false,
+                               isEraseMode: false,
+                               strokeColor: .black,
+                               strokeWidth: strokeWidth,
+                               expectedSize: canvasSize,
+                               onDrawingChanged: { _ in },
+                               onTapOnly: nil
                            )
+                           .blendMode(.destinationOut)
                            .frame(width: canvasSize.width, height: canvasSize.height)
+                           .allowsHitTesting(false)
+                           .zIndex(900)
+                       }
+
+                       // Active erase canvas — user draws strokes that cut through everything below
+                       if isCanvasErasing {
+                           PencilKitView(
+                               drawingData: $eraseDrawingData,
+                               isDrawingEnabled: true,
+                               isEraseMode: false,
+                               strokeColor: .black,
+                               strokeWidth: strokeWidth,
+                               expectedSize: canvasSize,
+                               onDrawingChanged: { newData in
+                                   if isPerformingStrokeUndoRedo { return }
+                                   if !eraseHistory.isEmpty && eraseHistory.last == newData { return }
+                                   eraseHistory.append(newData)
+                                   eraseRedoData = nil
+                               },
+                               onTapOnly: {
+                                   SoundEffectPlayer.shared.playClick()
+                                   finishEraseAndExit()
+                               }
+                           )
+                           .blendMode(.destinationOut)
+                           .id("pencilkit-erase-\(pencilKitCanvasNonce)")
+                           .frame(width: canvasSize.width, height: canvasSize.height)
+                           .allowsHitTesting(true)
                            .zIndex(1000)
                        }
-                       
+
                        // Visual debug indicator for tear processing
                        if isTearProcessing {
                            VStack {
@@ -1074,7 +1155,23 @@ struct CollageEditorView: View {
                        
                        
                    }
+                   .compositingGroup() // Required for destinationOut erase blend mode
                    .frame(width: canvasSize.width, height: canvasSize.height)
+                   .onAppear {
+                       if stableCanvasSize == .zero {
+                           stableCanvasSize = canvasSize
+                       }
+                       // Load saved erase mask into local buffer
+                       if let base64 = project.eraseDrawingDataBase64,
+                          let data = Data(base64Encoded: base64) {
+                           eraseDrawingData = data
+                       }
+                   }
+                   .onChange(of: canvasSize) { newSize in
+                       if !isDrawing {
+                           stableCanvasSize = newSize
+                       }
+                   }
                }
            }
     
@@ -1088,12 +1185,20 @@ struct CollageEditorView: View {
     // Unified toolbar (always visible, no mode switching)
     @ViewBuilder
     private func unifiedToolbar() -> some View {
-            // 1. Undo
+            // 1. Undo (also handles erase stroke undo when canvas eraser is active)
             ToolbarGridButton(
-                icon: (redoBuffer == nil) ? "arrow.uturn.backward" : "arrow.uturn.forward",
-                isDisabled: ((undoStack.isEmpty && redoBuffer == nil) || isDrawing) // Disable when drawing (use drawing undo instead)
+                icon: isCanvasErasing
+                    ? ((eraseRedoData == nil) ? "arrow.uturn.backward" : "arrow.uturn.forward")
+                    : ((redoBuffer == nil) ? "arrow.uturn.backward" : "arrow.uturn.forward"),
+                isDisabled: isCanvasErasing
+                    ? (eraseHistory.count <= 1 && eraseRedoData == nil)
+                    : ((undoStack.isEmpty && redoBuffer == nil) || isDrawing)
             ) {
-                undoLastAction()
+                if isCanvasErasing {
+                    undoEraseStroke()
+                } else {
+                    undoLastAction()
+                }
             }
             
             // 2. Add Image
@@ -1124,22 +1229,33 @@ struct CollageEditorView: View {
             }
             .editorCoachMarkTarget("editor.removeBackground")
             
-            // 4. Erase (image-specific, disabled if no image selected) - toggle on/off
+            // 4. Erase (canvas-level — erases paint, images, text via destinationOut blend)
             ToolbarGridButton(
                 icon: "eraser",
-                isDisabled: !showToolbarForSelectedImage,
-                isSelected: selectedTool == .erase
+                isDisabled: false,
+                isSelected: isCanvasErasing
             ) {
-                print("🧹 Erase button clicked. Selected image: \(String(describing: selectedImageId))")
-                // Toggle: if already erase, deactivate; otherwise activate
-                if selectedTool == .erase {
-                selectedTool = .pen
-                    isDrawing = false
-                    print("🧹 Erase deactivated")
+                if isCanvasErasing {
+                    finishEraseAndExit()
                 } else {
+                    // Deselect image/text and exit drawing mode before activating eraser
+                    selectedImageId = nil
+                    showToolbarForSelectedImage = false
+                    selectedTextId = nil
+                    showTextEditor = false
+                    if isDrawing { finishDrawingAndExit() }
                     selectedTool = .erase
-                    isDrawing = false // Erase doesn't use drawing mode
-                    print("🧹 Erase activated")
+                    isCanvasErasing = true
+                    // Load existing erase data from project
+                    if let base64 = project.eraseDrawingDataBase64,
+                       let data = Data(base64Encoded: base64) {
+                        eraseDrawingData = data
+                    } else {
+                        eraseDrawingData = Data()
+                    }
+                    eraseHistory = [eraseDrawingData]
+                    eraseRedoData = nil
+                    print("🧹 Canvas erase activated")
                 }
             }
             
@@ -2374,7 +2490,76 @@ struct CollageEditorView: View {
         }
     }
     
+    private func finishEraseAndExit() {
+        guard isCanvasErasing else { return }
+        guard !isFinishingEraseSave else { return }
+        isFinishingEraseSave = true
+
+        let dataSnapshot = eraseDrawingData
+        let previousEraseBase64 = project.eraseDrawingDataBase64
+
+        Task.detached(priority: .userInitiated) {
+            let base64 = dataSnapshot.base64EncodedString()
+            let newBase64 = base64.isEmpty ? nil : base64
+
+            await MainActor.run {
+                defer { isFinishingEraseSave = false }
+
+                if previousEraseBase64 != newBase64 {
+                    recordUndo(.eraseCanvas(previousEraseBase64: previousEraseBase64))
+                }
+
+                project.eraseDrawingDataBase64 = newBase64
+                store.update(project)
+
+                eraseDrawingData = dataSnapshot
+                eraseHistory = [dataSnapshot]
+                eraseRedoData = nil
+
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    isCanvasErasing = false
+                    selectedTool = .pen
+                }
+                print("🧹 Canvas erase saved and exited")
+            }
+        }
+    }
+
+    private func applyEraseDrawing(base64: String?) {
+        if let b64 = base64, let data = Data(base64Encoded: b64) {
+            eraseDrawingData = data
+        } else {
+            eraseDrawingData = Data()
+        }
+        eraseHistory = [eraseDrawingData]
+        eraseRedoData = nil
+        pencilKitCanvasNonce += 1
+    }
+
+    private func undoEraseStroke() {
+        isPerformingStrokeUndoRedo = true
+        DispatchQueue.main.async { self.isPerformingStrokeUndoRedo = false }
+
+        if let redo = eraseRedoData {
+            eraseDrawingData = redo
+            if eraseHistory.last != redo { eraseHistory.append(redo) }
+            eraseRedoData = nil
+            pencilKitCanvasNonce += 1
+        } else if eraseHistory.count > 1 {
+            eraseRedoData = eraseHistory.last
+            eraseHistory.removeLast()
+            eraseDrawingData = eraseHistory.last ?? Data()
+            pencilKitCanvasNonce += 1
+        } else if eraseHistory.count == 1 {
+            eraseRedoData = eraseHistory.last
+            eraseDrawingData = Data()
+            eraseHistory = [Data()]
+            pencilKitCanvasNonce += 1
+        }
+    }
+
     private func finishDrawingAndExit(onComplete: @escaping () -> Void = {}) {
+        isPaintErasing = false
         saveDrawingToProjectIfNeeded {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
                 isDrawing = false
@@ -2821,13 +3006,22 @@ struct CollageEditorView: View {
             
         case let .draw(previousDrawingBase64):
             newRedo.drawRedoBase64 = project.drawingDataBase64
-            
+
             project.drawingDataBase64 = previousDrawingBase64
             applyCanvasDrawing(base64: previousDrawingBase64)
             store.update(project)
             redoBuffer = newRedo
             return
-            
+
+        case let .eraseCanvas(previousEraseBase64):
+            newRedo.eraseCanvasRedoBase64 = project.eraseDrawingDataBase64
+
+            project.eraseDrawingDataBase64 = previousEraseBase64
+            applyEraseDrawing(base64: previousEraseBase64)
+            store.update(project)
+            redoBuffer = newRedo
+            return
+
         case let .addText(layer, _):
             project.textLayers.removeAll { $0.id == layer.id }
             store.update(project)
@@ -2944,7 +3138,12 @@ struct CollageEditorView: View {
             project.drawingDataBase64 = redo.drawRedoBase64
             applyCanvasDrawing(base64: redo.drawRedoBase64)
             store.update(project)
-            
+
+        case .eraseCanvas:
+            project.eraseDrawingDataBase64 = redo.eraseCanvasRedoBase64
+            applyEraseDrawing(base64: redo.eraseCanvasRedoBase64)
+            store.update(project)
+
         case let .addText(layer, index):
             // Enforce single text layer.
             project.textLayers = [layer]

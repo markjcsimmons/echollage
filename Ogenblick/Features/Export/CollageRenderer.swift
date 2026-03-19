@@ -266,6 +266,15 @@ enum CollageRenderer {
                 drawingImage.draw(in: CGRect(origin: .zero, size: size))
                 print("🎨 Drew global canvas drawing at size: \(size)")
             }
+
+            // Erase mask — punch holes through everything using CGBlendMode.clear
+            if let eraseBase64 = project.eraseDrawingDataBase64,
+               let eraseData = Data(base64Encoded: eraseBase64),
+               let eraseDrawing = try? PKDrawing(data: eraseData) {
+                let eraseImage = eraseDrawing.image(from: CGRect(origin: .zero, size: size), scale: screenScale)
+                eraseImage.draw(in: CGRect(origin: .zero, size: size), blendMode: .clear, alpha: 1.0)
+                print("🧹 Applied canvas erase mask at size: \(size)")
+            }
         }
     }
     

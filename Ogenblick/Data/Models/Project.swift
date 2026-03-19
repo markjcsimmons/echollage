@@ -78,13 +78,16 @@ struct Project: Codable, Identifiable, Equatable {
 
     // PencilKit drawing data archived via PKDrawing.dataRepresentation()
     var drawingDataBase64: String? = nil
-    
+
+    // Canvas-level erase mask — PKDrawing strokes composited with destinationOut
+    var eraseDrawingDataBase64: String? = nil
+
     // Background type (corkboard, white, or black)
     var backgroundType: BackgroundType = .corkboard
-    
+
     // Check if project has any content
     var hasContent: Bool {
-        return !imageLayers.isEmpty || !textLayers.isEmpty || drawingDataBase64 != nil
+        return !imageLayers.isEmpty || !textLayers.isEmpty || drawingDataBase64 != nil || eraseDrawingDataBase64 != nil
     }
 }
 
