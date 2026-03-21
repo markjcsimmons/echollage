@@ -539,16 +539,16 @@ struct CollageEditorView: View {
     }
     
     private var exportStatusView: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Preparing")
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Preparing Échollage…")
                 .font(.caption)
                 .foregroundStyle(.white.opacity(0.9))
-            Text("Échollage...")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.9))
+            ProgressView(value: exportProgress)
+                .tint(.white)
+                .frame(width: 80)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(
             Capsule()
                 .fill(.black.opacity(0.6))
@@ -965,6 +965,10 @@ struct CollageEditorView: View {
                 Color.clear
                     .editorCoachMarkTarget("editor.canvas")
                     .contentShape(Rectangle())
+                    .onTapGesture {
+                        // Single tap on empty canvas: cycle background (canvas sits above background layer, so we must handle it here).
+                        handleBackgroundTap()
+                    }
                     .highPriorityGesture(
                         TapGesture(count: 2)
                             .onEnded {
@@ -3240,7 +3244,11 @@ struct CollageEditorView: View {
         
         guard purchases.canExport else {
             print("❌ Cannot export - showing paywall")
-            showPaywall = true
+            await MainActor.run {
+                isExporting = false
+                exportProgress = 0
+                showPaywall = true
+            }
             return
         }
         

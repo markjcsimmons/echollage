@@ -6,12 +6,14 @@ final class PurchaseManager: ObservableObject {
     @Published private(set) var isSubscribed: Bool = false
     @Published private(set) var freeExportsRemaining: Int = max(0, 3 - UserDefaults.standard.integer(forKey: "exportCount"))
 
-    var canExport: Bool { 
-        // For development: allow unlimited exports
-        // TODO: Remove this before production release
+    var canExport: Bool {
         #if DEBUG
         return true
         #else
+        // Allow exports when installed via TestFlight so beta testers can try the share flow.
+        if Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt" {
+            return true
+        }
         return isSubscribed || freeExportsRemaining > 0
         #endif
     }
