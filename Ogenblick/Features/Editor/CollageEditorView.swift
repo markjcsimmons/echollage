@@ -609,7 +609,6 @@ struct CollageEditorView: View {
     }
     
     @ViewBuilder
-    @ViewBuilder
     private var eraseControlsOverlay: some View {
         if isCanvasErasing {
             VStack {
@@ -636,6 +635,7 @@ struct CollageEditorView: View {
         }
     }
 
+    @ViewBuilder
     private var drawingControlsOverlay: some View {
         if isDrawing && !isCanvasErasing {
             VStack {
