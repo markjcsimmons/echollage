@@ -7,10 +7,10 @@ import PencilKit
 
 /// Renders a collage project to a single flattened UIImage
 enum CollageRenderer {
-    /// Renders the collage at full screen dimensions (canvas fills entire screen in editor)
+    /// Renders the collage at full screen dimensions (canvas fills entire screen in editor).
+    /// Must run on the main actor because it reads UIScreen.main.
+    @MainActor
     static func render(project: Project, assetURLProvider: (String) -> URL?) -> UIImage? {
-        // Backwards-compatible wrapper (kept for call sites that don't have geometry).
-        // Note: UIScreen access is best kept on main thread.
         let size = UIScreen.main.bounds.size
         let screenScale = UIScreen.main.scale
         return render(project: project, assetURLProvider: assetURLProvider, canvasSize: size, screenScale: screenScale)

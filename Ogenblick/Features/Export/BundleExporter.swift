@@ -9,6 +9,7 @@ enum BundleExporter {
     }
     
     /// Exports a project as a .ogenblick bundle (zip with collage PNG + audio + metadata)
+    @MainActor
     static func exportBundle(project: Project, assetURLProvider: (String) -> URL?) throws -> ExportedBundle {
         guard let collageImage = CollageRenderer.render(project: project, assetURLProvider: assetURLProvider) else {
             throw NSError(domain: "BundleExporter", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to render collage"])
@@ -55,6 +56,7 @@ enum BundleExporter {
     }
     
     /// Exports just a static PNG share card with metadata overlay
+    @MainActor
     static func exportStaticCard(project: Project, assetURLProvider: (String) -> URL?) throws -> UIImage {
         guard var collageImage = CollageRenderer.render(project: project, assetURLProvider: assetURLProvider) else {
             throw NSError(domain: "BundleExporter", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to render collage"])
