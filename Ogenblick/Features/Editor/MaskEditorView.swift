@@ -148,20 +148,29 @@ final class MaskCanvasView: UIView {
 
         self.maskImage = newMask
 
-        // Save
-        if let data = newMask.pngData() {
-            let name = maskFileName ?? "mask_\(UUID().uuidString).png"
-            let url = store.urlForProjectAsset(projectId: projectId, fileName: name)
+        // Assign file name immediately so subsequent strokes resolve to the same file.
+        let name = maskFileName ?? "mask_\(UUID().uuidString).png"
+        maskFileName = name
+
+        // Capture all values needed by the background task before leaving the main thread.
+        let maskCopy = newMask
+        let savedName = name
+        let savedURL = store.urlForProjectAsset(projectId: projectId, fileName: name)
+        let onSavedCopy = onSaved
+
+        // PNG encoding and disk write are moved off the main thread to avoid frame drops.
+        Task.detached(priority: .utility) {
+            guard let data = maskCopy.pngData() else {
+                print("❌ Failed to get PNG data from mask")
+                return
+            }
             do {
-                try data.write(to: url)
-                print("✅ Saved mask: \(name) (\(data.count) bytes)")
-                maskFileName = name
-                onSaved?(name)
+                try data.write(to: savedURL)
+                print("✅ Saved mask: \(savedName) (\(data.count) bytes)")
+                await MainActor.run { onSavedCopy?(savedName) }
             } catch {
                 print("❌ Failed to save mask: \(error)")
             }
-        } else {
-            print("❌ Failed to get PNG data from mask")
         }
     }
 

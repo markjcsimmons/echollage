@@ -392,7 +392,8 @@ struct ACRCloudService {
         
         for (attempt, delay) in delaysNs.enumerated() {
             if delay > 0 {
-                try? await Task.sleep(nanoseconds: delay)
+                // Use try (not try?) so CancellationError propagates and stops retrying immediately.
+                try await Task.sleep(nanoseconds: delay)
             }
             
             do {
@@ -410,6 +411,8 @@ struct ACRCloudService {
                     )
                 }
             } catch {
+                // Re-throw cancellation immediately instead of retrying.
+                if Task.isCancelled { throw error }
                 lastError = error
                 print("⚠️ ACRCloudService: Sample extraction attempt \(attempt + 1) failed: \(error.localizedDescription)")
             }
