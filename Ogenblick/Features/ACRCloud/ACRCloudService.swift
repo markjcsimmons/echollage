@@ -74,21 +74,21 @@ struct ACRCloudService {
         
         // Add text fields first
         for (key, value) in textFields {
-            body.append("--\(boundaryString)\r\n".data(using: .utf8)!)
-            body.append("Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".data(using: .utf8)!)
-            body.append(value.data(using: .utf8)!)
-            body.append("\r\n".data(using: .utf8)!)
+            if let d = "--\(boundaryString)\r\n".data(using: .utf8) { body.append(d) }
+            if let d = "Content-Disposition: form-data; name=\"\(key)\"\r\n\r\n".data(using: .utf8) { body.append(d) }
+            if let d = value.data(using: .utf8) { body.append(d) }
+            if let d = "\r\n".data(using: .utf8) { body.append(d) }
         }
         
         // Add sample field as binary file (ACRCloud REST API prefers raw binary over base64)
-        body.append("--\(boundaryString)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"sample\"; filename=\"audio.wav\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
-        body.append(audioSample) // Send raw binary WAV data
-        body.append("\r\n".data(using: .utf8)!)
+        if let d = "--\(boundaryString)\r\n".data(using: .utf8) { body.append(d) }
+        if let d = "Content-Disposition: form-data; name=\"sample\"; filename=\"audio.wav\"\r\n".data(using: .utf8) { body.append(d) }
+        if let d = "Content-Type: audio/wav\r\n\r\n".data(using: .utf8) { body.append(d) }
+        body.append(audioSample)
+        if let d = "\r\n".data(using: .utf8) { body.append(d) }
         
         // Close multipart form
-        body.append("--\(boundaryString)--\r\n".data(using: .utf8)!)
+        if let d = "--\(boundaryString)--\r\n".data(using: .utf8) { body.append(d) }
         
         request.httpBody = body
         request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
@@ -436,13 +436,14 @@ struct ACRCloudService {
         
         // WAV header
         // RIFF chunk descriptor
-        wavData.append("RIFF".data(using: .ascii)!)
+        // ASCII literals are guaranteed to encode; use ?? Data() as a safe fallback.
+        wavData.append("RIFF".data(using: .ascii) ?? Data())
         let dataSize = UInt32(36 + pcmData.count) // File size - 8
         appendLittleEndian(dataSize, to: &wavData)
-        wavData.append("WAVE".data(using: .ascii)!)
+        wavData.append("WAVE".data(using: .ascii) ?? Data())
         
         // fmt sub-chunk
-        wavData.append("fmt ".data(using: .ascii)!)
+        wavData.append("fmt ".data(using: .ascii) ?? Data())
         let fmtChunkSize: UInt32 = 16 // PCM format chunk size
         appendLittleEndian(fmtChunkSize, to: &wavData)
         let audioFormat: UInt16 = 1 // PCM
@@ -456,7 +457,7 @@ struct ACRCloudService {
         appendLittleEndian(bitsPerSample, to: &wavData)
         
         // data sub-chunk
-        wavData.append("data".data(using: .ascii)!)
+        wavData.append("data".data(using: .ascii) ?? Data())
         let dataChunkSize = UInt32(pcmData.count)
         appendLittleEndian(dataChunkSize, to: &wavData)
         wavData.append(pcmData)

@@ -1602,17 +1602,20 @@ struct CollageEditorView: View {
             
             print("🧹 Converted \(self.erasePoints.count) canvas points to \(imagePoints.count) image points")
             
+            // Snapshot main-actor state before going off-main.
+            let brushSizeSnapshot = brushSize
+            guard let eraseStore = self.store, let eraseProjectId = self.project?.id else { return }
+            
             // Apply pressure-sensitive erase stroke on background thread
             DispatchQueue.global(qos: .userInitiated).async {
-                guard let erasedImage = self.applyEraseStroke(to: currentImage, points: imagePoints, brushSize: self.brushSize) else {
+                guard let erasedImage = self.applyEraseStroke(to: currentImage, points: imagePoints, brushSize: brushSizeSnapshot) else {
                     print("🧹 Failed to apply erase")
                     return
                 }
                 
                 // Save the erased image
                 let fileName = "erased_\(UUID().uuidString).png"
-                guard let store = self.store, let projectId = self.project?.id else { return }
-                let url = store.urlForProjectAsset(projectId: projectId, fileName: fileName)
+                let url = eraseStore.urlForProjectAsset(projectId: eraseProjectId, fileName: fileName)
                 
                 if let data = erasedImage.pngData() {
                     do {
@@ -1623,7 +1626,7 @@ struct CollageEditorView: View {
                             guard var updated = self.project else { return }
                             updated.imageLayers[idx].erasedImageFileName = fileName
                             self.project = updated
-                            store.update(updated)
+                            eraseStore.update(updated)
                             
                             // Create undo action with previous state
                             let undoAction = CollageEditorView.UndoAction.erase(layerId: layer.id, previousFileName: previousErasedFileName)
@@ -3614,6 +3617,10 @@ struct CollageEditorView: View {
         
         print("✂️ Starting tear with \(validPoints) valid points")
         
+        // Snapshot store/projectId on main thread before going off-main.
+        let storeRef = store
+        let projectId = project.id
+        
         // Split on background thread
         DispatchQueue.global(qos: .userInitiated).async {
             let (first, second) = ImageSplitter.splitImage(ui, alongPath: imagePath)
@@ -3626,8 +3633,8 @@ struct CollageEditorView: View {
             let fileName1 = "torn_1_\(UUID().uuidString).png"
             let fileName2 = "torn_2_\(UUID().uuidString).png"
             
-            let url1 = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName1)
-            let url2 = self.store.urlForProjectAsset(projectId: self.project.id, fileName: fileName2)
+            let url1 = storeRef.urlForProjectAsset(projectId: projectId, fileName: fileName1)
+            let url2 = storeRef.urlForProjectAsset(projectId: projectId, fileName: fileName2)
             
             if let data1 = piece1.pngData(), let data2 = piece2.pngData() {
                 do {
@@ -3713,6 +3720,10 @@ struct CollageEditorView: View {
         
         print("✂️ HANDLER: Starting split on background thread...")
         
+        // Snapshot store/projectId on main thread before going off-main.
+        let storeRef2 = store
+        let projectId2 = project.id
+        
         // Split on background thread
         DispatchQueue.global(qos: .userInitiated).async {
             let (first, second) = ImageSplitter.splitImage(ui, alongPath: imagePath)
@@ -3727,8 +3738,8 @@ struct CollageEditorView: View {
             let topFileName = "torn_top_\(UUID().uuidString).png"
             let bottomFileName = "torn_bottom_\(UUID().uuidString).png"
             
-            let topURL = self.store.urlForProjectAsset(projectId: self.project.id, fileName: topFileName)
-            let bottomURL = self.store.urlForProjectAsset(projectId: self.project.id, fileName: bottomFileName)
+            let topURL = storeRef2.urlForProjectAsset(projectId: projectId2, fileName: topFileName)
+            let bottomURL = storeRef2.urlForProjectAsset(projectId: projectId2, fileName: bottomFileName)
             
             if let topData = topImage.pngData(),
                let bottomData = bottomImage.pngData() {

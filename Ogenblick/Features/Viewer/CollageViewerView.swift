@@ -50,9 +50,16 @@ struct CollageViewerView: View {
             isRendering = true
             let size = UIScreen.main.bounds.size
             let scale = UIScreen.main.scale
+            // Pre-build URL map on main thread so background renderer never crosses actor boundary.
+            let allNames = project.imageLayers.map { $0.imageFileName }
+                + project.imageLayers.compactMap { $0.erasedImageFileName }
+                + project.imageLayers.compactMap { $0.maskFileName }
+            let urlMap: [String: URL] = Dictionary(uniqueKeysWithValues:
+                allNames.compactMap { name in assetURLProvider(name).map { (name, $0) } }
+            )
             let image = await CollageRenderer.renderAsync(
                 project: project,
-                assetURLProvider: assetURLProvider,
+                assetURLProvider: { urlMap[$0] },
                 canvasSize: size,
                 screenScale: scale
             )

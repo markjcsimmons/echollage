@@ -150,13 +150,13 @@ class SoundEffectPlayer {
         let dataSize = sampleCount * 2 // 16-bit samples
         let fileSize = 44 + dataSize // WAV header is 44 bytes
         
-        // RIFF header
-        data.append("RIFF".data(using: .ascii)!)
+        // RIFF header (ASCII literals are guaranteed to encode; ?? Data() is a safe fallback)
+        data.append("RIFF".data(using: .ascii) ?? Data())
         data.append(contentsOf: withUnsafeBytes(of: UInt32(fileSize - 8).littleEndian) { Data($0) })
-        data.append("WAVE".data(using: .ascii)!)
+        data.append("WAVE".data(using: .ascii) ?? Data())
         
         // fmt chunk
-        data.append("fmt ".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii) ?? Data())
         data.append(contentsOf: withUnsafeBytes(of: UInt32(16).littleEndian) { Data($0) }) // fmt chunk size
         data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) }) // audio format (PCM)
         data.append(contentsOf: withUnsafeBytes(of: UInt16(1).littleEndian) { Data($0) }) // num channels
@@ -166,7 +166,7 @@ class SoundEffectPlayer {
         data.append(contentsOf: withUnsafeBytes(of: UInt16(16).littleEndian) { Data($0) }) // bits per sample
         
         // data chunk
-        data.append("data".data(using: .ascii)!)
+        data.append("data".data(using: .ascii) ?? Data())
         data.append(contentsOf: withUnsafeBytes(of: UInt32(dataSize).littleEndian) { Data($0) })
         
         // Append sample data
