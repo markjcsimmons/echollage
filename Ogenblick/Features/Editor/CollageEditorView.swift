@@ -3261,9 +3261,24 @@ struct CollageEditorView: View {
             let size = await MainActor.run { UIScreen.main.bounds.size }
             let scale = await MainActor.run { UIScreen.main.scale }
             let projectSnapshot = project
+            // Pre-build asset URL map on the main thread so the background renderer
+            // never needs to call back into @MainActor-isolated state (avoids silent
+            // nil returns in release/TestFlight builds due to strict concurrency).
+            let allFileNames: [String] = await MainActor.run {
+                var names: [String] = []
+                names += projectSnapshot.imageLayers.map { $0.imageFileName }
+                names += projectSnapshot.imageLayers.compactMap { $0.erasedImageFileName }
+                names += projectSnapshot.imageLayers.compactMap { $0.maskFileName }
+                return names
+            }
+            let assetURLMap: [String: URL] = await MainActor.run {
+                Dictionary(uniqueKeysWithValues: allFileNames.compactMap { name in
+                    assetURL(for: name).map { (name, $0) }
+                })
+            }
             let collageImage = await CollageRenderer.renderAsync(
                 project: projectSnapshot,
-                assetURLProvider: assetURL,
+                assetURLProvider: { assetURLMap[$0] },
                 canvasSize: size,
                 screenScale: scale
             )
