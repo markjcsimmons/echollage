@@ -3772,16 +3772,17 @@ struct CollageEditorView: View {
         bottomFileName: String,
         originalTransform: Transform2D
     ) {
-        print("✂️ SPLIT: Called! Current layer count: \(project.imageLayers.count), removing index \(originalIndex)")
-        
-        // Guard against invalid index
-        guard originalIndex < project.imageLayers.count else {
-            print("❌ SPLIT: Invalid index \(originalIndex), layer count: \(project.imageLayers.count)")
+        // Re-resolve index by layer ID at call time: the integer index captured earlier
+        // may be stale if layers were reordered or added during the background file write.
+        guard let currentIndex = project.imageLayers.firstIndex(where: { $0.id == originalLayer.id }) else {
+            print("❌ SPLIT: Layer \(originalLayer.id) no longer exists — cancelling split")
             return
         }
         
+        print("✂️ SPLIT: Called! Removing layer at resolved index \(currentIndex) (captured index was \(originalIndex))")
+        
         // Remove the original image layer
-        project.imageLayers.remove(at: originalIndex)
+        project.imageLayers.remove(at: currentIndex)
         print("✂️ SPLIT: Removed layer. New count: \(project.imageLayers.count)")
         
         // Calculate separation: move pieces apart by 7.5% in opposite directions
