@@ -47,6 +47,8 @@ class MP4VideoExporter {
         // This is simpler and more reliable than trying to append multiple frames
         let tempVideoURL = FileManager.default.temporaryDirectory.appendingPathComponent("temp_video_\(UUID().uuidString).mov")
         try? FileManager.default.removeItem(at: tempVideoURL)
+        // Guarantee cleanup of the temp .mov even if we throw early.
+        defer { try? FileManager.default.removeItem(at: tempVideoURL) }
         
         // Create video writer for temporary file
         let writer = try AVAssetWriter(outputURL: tempVideoURL, fileType: .mov)
@@ -198,9 +200,6 @@ class MP4VideoExporter {
         await exportSession.export()
         
         progress(0.9)
-        
-        // Clean up temporary file
-        try? FileManager.default.removeItem(at: tempVideoURL)
         
         if exportSession.status == .completed {
             progress(1.0)
