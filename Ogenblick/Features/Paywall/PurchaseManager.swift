@@ -3,8 +3,11 @@ import StoreKit
 
 @MainActor
 final class PurchaseManager: ObservableObject {
+    /// Effectively unlimited for launch — lower this to monetize later.
+    private static let freeExportLimit = 999
+
     @Published private(set) var isSubscribed: Bool = false
-    @Published private(set) var freeExportsRemaining: Int = max(0, 3 - UserDefaults.standard.integer(forKey: "exportCount"))
+    @Published private(set) var freeExportsRemaining: Int = max(0, freeExportLimit - UserDefaults.standard.integer(forKey: "exportCount"))
 
     var canExport: Bool {
         #if DEBUG
@@ -22,7 +25,7 @@ final class PurchaseManager: ObservableObject {
         guard !isSubscribed else { return }
         let current = UserDefaults.standard.integer(forKey: "exportCount")
         UserDefaults.standard.set(current + 1, forKey: "exportCount")
-        freeExportsRemaining = max(0, 3 - (current + 1))
+        freeExportsRemaining = max(0, Self.freeExportLimit - (current + 1))
     }
 
     // MARK: - StoreKit 2 scaffolding
@@ -69,7 +72,7 @@ final class PurchaseManager: ObservableObject {
     #if DEBUG
     func resetExportCount() {
         UserDefaults.standard.set(0, forKey: "exportCount")
-        freeExportsRemaining = 3
+        freeExportsRemaining = Self.freeExportLimit
     }
     #endif
 }
