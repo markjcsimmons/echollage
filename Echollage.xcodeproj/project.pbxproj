@@ -369,6 +369,9 @@
 			name = Echollage;
 			packageProductDependencies = (
 				4D692AF72EF4984500FB2D3B /* Algorithms */,
+				4D692AFD2EF4C00000FB2D3B /* FirebaseAnalytics */,
+				4D692AFE2EF4C00100FB2D3B /* FirebaseCrashlytics */,
+				4D692AFF2EF4C00200FB2D3B /* FirebaseMessaging */,
 			);
 			productName = Ogenblick;
 			productReference = AF13078ACBBCEF8DAC8DAE6F /* Echollage.app */;
@@ -511,7 +514,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_ENTITLEMENTS = Ogenblick/Ogenblick.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CURRENT_PROJECT_VERSION[sdk=*]" = 11;
 				INFOPLIST_FILE = Ogenblick/Resources/Info.plist;
@@ -654,7 +657,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_ENTITLEMENTS = Ogenblick/Ogenblick.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				INFOPLIST_FILE = Ogenblick/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
@@ -716,6 +719,21 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4D692AF62EF4984500FB2D3B /* XCRemoteSwiftPackageReference "swift-algorithms" */;
 			productName = Algorithms;
+		};
+		4D692AFD2EF4C00000FB2D3B /* FirebaseAnalytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4D692AF82EF49DE100FB2D3B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAnalytics;
+		};
+		4D692AFE2EF4C00100FB2D3B /* FirebaseCrashlytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4D692AF82EF49DE100FB2D3B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCrashlytics;
+		};
+		4D692AFF2EF4C00200FB2D3B /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 4D692AF82EF49DE100FB2D3B /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

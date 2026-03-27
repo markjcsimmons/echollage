@@ -11,6 +11,45 @@ class MP4VideoExporter {
         case audioNotFound
         case exportFailed(String)
     }
+
+    /// Build QuickTime/MP4 metadata items so every exported video is self-describing.
+    /// A future backend can read these to catalog content without re-processing.
+    static func exportMetadata(
+        projectName: String,
+        backgroundType: String,
+        layerCount: Int,
+        musicMetadata: MusicMetadata?
+    ) -> [AVMetadataItem] {
+        var items: [AVMetadataItem] = []
+
+        func item(_ identifier: AVMetadataIdentifier, _ value: String) -> AVMutableMetadataItem {
+            let m = AVMutableMetadataItem()
+            m.identifier = identifier
+            m.value = value as NSString
+            return m
+        }
+
+        items.append(item(.quickTimeMetadataContentIdentifier, UUID().uuidString))
+        items.append(item(.quickTimeMetadataCreator, UserIdentity.shared.id))
+        items.append(item(.commonIdentifierTitle, projectName))
+        items.append(item(.quickTimeMetadataSoftware, "Echollage"))
+
+        var desc: [String: Any] = [
+            "backgroundType": backgroundType,
+            "layerCount": layerCount
+        ]
+        if let music = musicMetadata {
+            desc["musicTitle"] = music.title
+            desc["musicArtist"] = music.artist
+            desc["musicSource"] = music.source
+        }
+        if let json = try? JSONSerialization.data(withJSONObject: desc),
+           let jsonString = String(data: json, encoding: .utf8) {
+            items.append(item(.commonIdentifierDescription, jsonString))
+        }
+
+        return items
+    }
     
     /// Export a collage with a **playing** video background, foreground overlay, and audio.
     /// Uses AVMutableVideoComposition + Core Animation to composite the overlay on the video.
@@ -22,6 +61,7 @@ class MP4VideoExporter {
         canvasSize: CGSize,
         screenScale: CGFloat,
         musicMetadata: MusicMetadata? = nil,
+        videoMetadata: [AVMetadataItem] = [],
         progress: @escaping (Double) -> Void
     ) async throws {
         try? FileManager.default.removeItem(at: outputURL)
@@ -168,7 +208,8 @@ class MP4VideoExporter {
         exportSession.outputFileType = .mp4
         exportSession.videoComposition = videoComposition
         exportSession.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
-        
+        exportSession.metadata = videoMetadata
+
         print("🎬 Exporting video-background MP4: renderSize=\(renderSize), duration=\(totalDuration.seconds)s")
         
         await exportSession.export()
@@ -199,6 +240,7 @@ class MP4VideoExporter {
         duration: TimeInterval,
         outputURL: URL,
         musicMetadata: MusicMetadata? = nil,
+        videoMetadata: [AVMetadataItem] = [],
         progress: @escaping (Double) -> Void
     ) async throws {
         
@@ -366,6 +408,7 @@ class MP4VideoExporter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mp4
         exportSession.timeRange = CMTimeRange(start: .zero, duration: compositionDuration)
+        exportSession.metadata = videoMetadata
         
         print("📊 Export session time range: start=0, duration=\(compositionDuration.seconds)s")
         
@@ -421,6 +464,42 @@ class MP4VideoExporter {
         return buffer
     }
     
+    /// Re-encode an MP4 at 720p to reduce file size for sharing and future uploads.
+    /// Typically shrinks a 40-80 MB export down to 5-15 MB with no visible quality loss on phones.
+    static func compress(
+        inputURL: URL,
+        outputURL: URL,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        try? FileManager.default.removeItem(at: outputURL)
+
+        let asset = AVAsset(url: inputURL)
+        guard let session = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPreset1280x720
+        ) else {
+            throw ExportError.exportFailed("Failed to create compression session")
+        }
+
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true
+
+        progress(0.0)
+        await session.export()
+
+        guard session.status == .completed else {
+            throw ExportError.exportFailed(
+                session.error?.localizedDescription ?? "Compression failed"
+            )
+        }
+        progress(1.0)
+
+        let inputSize = (try? FileManager.default.attributesOfItem(atPath: inputURL.path)[.size] as? Int) ?? 0
+        let outputSize = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? Int) ?? 0
+        print("🗜️ Compressed \(inputSize / 1024)KB → \(outputSize / 1024)KB (\(inputSize > 0 ? Int(Double(outputSize) / Double(inputSize) * 100) : 0)%)")
+    }
+
     /// Add overlay with app name (and music metadata if available) at bottom
     private static func addOverlay(to image: UIImage, musicMetadata: MusicMetadata?) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: image.size)

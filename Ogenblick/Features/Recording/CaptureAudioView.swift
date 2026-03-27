@@ -299,6 +299,7 @@ struct CaptureAudioView: View {
             await MainActor.run {
                 if let duration = duration, duration > 0 {
                     project.audioDuration = duration
+                    AnalyticsService.logAudioRecorded(durationSeconds: duration)
                     print("✅ Audio duration saved: \(duration)s")
                 } else {
                     print("❌ Could not load audio duration - file may be corrupted")
@@ -332,6 +333,7 @@ struct CaptureAudioView: View {
                         project.textLayers.append(textLayer)
                         store.update(project)
                         
+                        AnalyticsService.logMusicIdentified(title: metadata.title, artist: metadata.artist)
                         viewModel.recognitionResult = "✓ \(metadata.title) by \(metadata.artist)"
                         viewModel.isRecognizing = false
                     }

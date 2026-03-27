@@ -20,7 +20,13 @@ struct PaywallView: View {
             } else {
                 ForEach(purchases.products, id: \.id) { product in
                     Button {
-                        Task { await purchases.purchase(product); if purchases.isSubscribed { dismiss() } }
+                        Task {
+                            await purchases.purchase(product)
+                            if purchases.isSubscribed {
+                                AnalyticsService.logSubscriptionPurchased(productId: product.id)
+                                dismiss()
+                            }
+                        }
                     } label: {
                         HStack { Text(product.displayName); Spacer(); Text(product.displayPrice).bold() }
                     }
@@ -32,6 +38,9 @@ struct PaywallView: View {
                 .padding(.top, 8)
         }
         .padding()
+        .onAppear {
+            AnalyticsService.logPaywallShown(freeExportsRemaining: purchases.freeExportsRemaining)
+        }
     }
 }
 

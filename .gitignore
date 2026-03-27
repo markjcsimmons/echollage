@@ -94,6 +94,9 @@ iOSInjectionProject/
 !Secrets.sample.plist
 !Info.plist
 
+# APNs authentication keys
+*.p8
+
 # macOS
 .DS_Store
 

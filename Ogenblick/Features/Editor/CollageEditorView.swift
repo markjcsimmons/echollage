@@ -3,6 +3,7 @@ import AVFoundation
 import AVKit
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct CollageEditorView: View {
     @EnvironmentObject private var store: ProjectStore
@@ -236,6 +237,7 @@ struct CollageEditorView: View {
             }
         }
         store.update(project)
+        AnalyticsService.logBackgroundSelected(type: project.backgroundType.rawValue)
         print("🎨 Background changed to: \(project.backgroundType)")
     }
     
@@ -3256,7 +3258,7 @@ struct CollageEditorView: View {
         }
         
         print("✅ Export allowed, starting export process...")
-        // isExporting already set to true before this function is called for immediate feedback
+        AnalyticsService.logExportStarted(backgroundType: project.backgroundType.rawValue)
         
         do {
             print("🎬 Step 1: Rendering collage image...")
@@ -3375,10 +3377,18 @@ struct CollageEditorView: View {
                 exportProgress = 0.2
             }
             
-            // Create output video URL
+            // Create output video URLs (full-quality temp + compressed final)
             let videoName = "\(project.name.replacingOccurrences(of: " ", with: "_"))_\(UUID().uuidString.prefix(8)).mp4"
+            let rawVideoURL = FileManager.default.temporaryDirectory.appendingPathComponent("raw_\(videoName)")
             let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(videoName)
             print("🎬 Step 3: Creating video at: \(videoURL.lastPathComponent)")
+            
+            let mp4Metadata = MP4VideoExporter.exportMetadata(
+                projectName: project.name,
+                backgroundType: project.backgroundType.rawValue,
+                layerCount: project.imageLayers.count,
+                musicMetadata: project.musicMetadata
+            )
             
             if isVideoBackground {
                 // Video background — composite the actual playing video under the foreground
@@ -3397,13 +3407,14 @@ struct CollageEditorView: View {
                     backgroundVideoURL: bgVideoURL,
                     overlayImage: collageImage,
                     audioURL: audioURL,
-                    outputURL: videoURL,
+                    outputURL: rawVideoURL,
                     canvasSize: size,
                     screenScale: scale,
                     musicMetadata: project.musicMetadata,
+                    videoMetadata: mp4Metadata,
                     progress: { progressValue in
                         DispatchQueue.main.async {
-                            exportProgress = 0.2 + (progressValue * 0.8)
+                            exportProgress = 0.2 + (progressValue * 0.6)
                         }
                     }
                 )
@@ -3413,17 +3424,18 @@ struct CollageEditorView: View {
                     image: collageImage,
                     audioURL: audioURL,
                     duration: duration,
-                    outputURL: videoURL,
+                    outputURL: rawVideoURL,
                     musicMetadata: project.musicMetadata,
+                    videoMetadata: mp4Metadata,
                     progress: { progressValue in
                         DispatchQueue.main.async {
-                            exportProgress = 0.2 + (progressValue * 0.8)
+                            exportProgress = 0.2 + (progressValue * 0.6)
                         }
                     }
                 )
             }
             
-            guard FileManager.default.fileExists(atPath: videoURL.path) else {
+            guard FileManager.default.fileExists(atPath: rawVideoURL.path) else {
                 print("❌ Video file was not created")
                 await MainActor.run {
                     exportError = "Video file was not created"
@@ -3433,14 +3445,40 @@ struct CollageEditorView: View {
                 return
             }
             
+            // Step 4: Compress to 720p for smaller file size
+            print("🗜️ Step 4: Compressing video...")
+            await MainActor.run { exportProgress = 0.8 }
+            try await MP4VideoExporter.compress(
+                inputURL: rawVideoURL,
+                outputURL: videoURL,
+                progress: { progressValue in
+                    DispatchQueue.main.async {
+                        exportProgress = 0.8 + (progressValue * 0.15)
+                    }
+                }
+            )
+            try? FileManager.default.removeItem(at: rawVideoURL)
+            
             let fileSize = (try? FileManager.default.attributesOfItem(atPath: videoURL.path)[.size] as? Int) ?? 0
             print("✅ Video created successfully: \(videoURL.lastPathComponent) (\(fileSize) bytes)")
             
+            AnalyticsService.logExportCompleted(
+                backgroundType: project.backgroundType.rawValue,
+                durationSeconds: duration
+            )
             purchases.registerSuccessfulExport()
             
-            // Present share sheet immediately - no delay needed
+            // Ask for notification permission after the first export (positive moment)
+            if !UserDefaults.standard.bool(forKey: "hasRequestedNotifications") {
+                UserDefaults.standard.set(true, forKey: "hasRequestedNotifications")
+                try? await UNUserNotificationCenter.current().requestAuthorization(
+                    options: [.alert, .sound, .badge]
+                )
+            }
+            
+            // Present share sheet
             await MainActor.run {
-                print("🎬 Step 4: Presenting share sheet...")
+                print("🎬 Step 5: Presenting share sheet...")
                 isExporting = false
                 
                 // Find the topmost view controller using the extension method that was working before
@@ -3477,6 +3515,7 @@ struct CollageEditorView: View {
                 print("✅ About to present share sheet from: \(type(of: topViewController))")
                 topViewController.present(av, animated: true) {
                     print("✅ Share sheet presented successfully")
+                    AnalyticsService.logSharePresented()
                 }
             }
         } catch {
