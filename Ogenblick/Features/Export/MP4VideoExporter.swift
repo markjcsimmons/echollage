@@ -12,6 +12,179 @@ class MP4VideoExporter {
         case exportFailed(String)
     }
     
+    /// Export a collage with a **playing** video background, foreground overlay, and audio.
+    /// Uses AVMutableVideoComposition + Core Animation to composite the overlay on the video.
+    static func exportWithVideoBackground(
+        backgroundVideoURL: URL,
+        overlayImage: UIImage,
+        audioURL: URL,
+        outputURL: URL,
+        canvasSize: CGSize,
+        screenScale: CGFloat,
+        musicMetadata: MusicMetadata? = nil,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        try? FileManager.default.removeItem(at: outputURL)
+        progress(0.05)
+        
+        let finalOverlay = addOverlay(to: overlayImage, musicMetadata: musicMetadata)
+        guard let overlayCGImage = finalOverlay.cgImage else {
+            throw ExportError.imageRenderingFailed
+        }
+        
+        let bgAsset = AVAsset(url: backgroundVideoURL)
+        let audioAsset = AVAsset(url: audioURL)
+        
+        guard let bgVideoTrack = try await bgAsset.loadTracks(withMediaType: .video).first else {
+            throw ExportError.exportFailed("Failed to load background video track")
+        }
+        guard let sourceAudioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
+            throw ExportError.audioNotFound
+        }
+        
+        let audioTrackRange = try await sourceAudioTrack.load(.timeRange)
+        let totalDuration = audioTrackRange.duration
+        let bgDuration = try await bgAsset.load(.duration)
+        let videoNaturalSize = try await bgVideoTrack.load(.naturalSize)
+        let videoPreferredTransform = try await bgVideoTrack.load(.preferredTransform)
+        
+        let transformedRect = CGRect(origin: .zero, size: videoNaturalSize)
+            .applying(videoPreferredTransform)
+        let displaySize = CGSize(
+            width: abs(transformedRect.width),
+            height: abs(transformedRect.height)
+        )
+        
+        progress(0.1)
+        
+        // Pixel dimensions for the output video
+        let renderSize = CGSize(
+            width: canvasSize.width * screenScale,
+            height: canvasSize.height * screenScale
+        )
+        
+        let composition = AVMutableComposition()
+        
+        guard let compVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.exportFailed("Failed to create composition video track")
+        }
+        
+        guard let compAudioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.exportFailed("Failed to create composition audio track")
+        }
+        
+        // Loop the background video to fill the entire audio duration
+        var currentTime = CMTime.zero
+        while currentTime < totalDuration {
+            let remaining = totalDuration - currentTime
+            let insertDuration = CMTimeMinimum(bgDuration, remaining)
+            try compVideoTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: insertDuration),
+                of: bgVideoTrack,
+                at: currentTime
+            )
+            currentTime = currentTime + insertDuration
+        }
+        
+        // Insert the full audio
+        try compAudioTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: totalDuration),
+            of: sourceAudioTrack,
+            at: .zero
+        )
+        
+        progress(0.3)
+        
+        // --- Video composition: scale video to fill + overlay ---
+        
+        // Transform: preferredTransform -> scale to aspect-fill renderSize -> center
+        var tx = videoPreferredTransform
+        tx.tx -= transformedRect.origin.x
+        tx.ty -= transformedRect.origin.y
+        
+        let fillScale = max(
+            renderSize.width / displaySize.width,
+            renderSize.height / displaySize.height
+        )
+        let scaledW = displaySize.width * fillScale
+        let scaledH = displaySize.height * fillScale
+        let offsetX = (renderSize.width - scaledW) / 2
+        let offsetY = (renderSize.height - scaledH) / 2
+        
+        let finalTransform = tx
+            .concatenating(CGAffineTransform(scaleX: fillScale, y: fillScale))
+            .concatenating(CGAffineTransform(translationX: offsetX, y: offsetY))
+        
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(
+            assetTrack: compVideoTrack
+        )
+        layerInstruction.setTransform(finalTransform, at: .zero)
+        
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
+        instruction.layerInstructions = [layerInstruction]
+        
+        // Core Animation layer tree: parent -> [videoLayer, overlayLayer]
+        let videoLayer = CALayer()
+        videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+        
+        let overlayLayer = CALayer()
+        overlayLayer.frame = CGRect(origin: .zero, size: renderSize)
+        overlayLayer.contents = overlayCGImage
+        overlayLayer.contentsGravity = .resize
+        overlayLayer.isGeometryFlipped = true
+        
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: renderSize)
+        parentLayer.isGeometryFlipped = true
+        parentLayer.addSublayer(videoLayer)
+        parentLayer.addSublayer(overlayLayer)
+        
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = [instruction]
+        videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
+        
+        progress(0.5)
+        
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw ExportError.exportFailed("Failed to create export session")
+        }
+        
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.videoComposition = videoComposition
+        exportSession.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
+        
+        print("🎬 Exporting video-background MP4: renderSize=\(renderSize), duration=\(totalDuration.seconds)s")
+        
+        await exportSession.export()
+        
+        progress(0.95)
+        
+        guard exportSession.status == .completed else {
+            throw ExportError.exportFailed(
+                exportSession.error?.localizedDescription ?? "Video background export failed"
+            )
+        }
+        
+        progress(1.0)
+        print("✅ Video-background MP4 created: \(outputURL.lastPathComponent)")
+    }
+    
     /// Export a collage with audio as an MP4 video
     /// - Parameters:
     ///   - image: The rendered collage image

@@ -3279,11 +3279,22 @@ struct CollageEditorView: View {
                     assetURL(for: name).map { (name, $0) }
                 })
             }
+            
+            let isVideoBackground: Bool = {
+                switch projectSnapshot.backgroundType {
+                case .fireworks, .mountains, .waves, .tiny, .medium, .small:
+                    return true
+                default:
+                    return false
+                }
+            }()
+            
             let collageImage = await CollageRenderer.renderAsync(
                 project: projectSnapshot,
                 assetURLProvider: { assetURLMap[$0] },
                 canvasSize: size,
-                screenScale: scale
+                screenScale: scale,
+                skipBackground: isVideoBackground
             )
             guard let collageImage else {
                 print("❌ Failed to render collage")
@@ -3294,7 +3305,7 @@ struct CollageEditorView: View {
                 }
                 return
             }
-            print("✅ Collage image rendered: \(collageImage.size)")
+            print("✅ Collage image rendered: \(collageImage.size), videoBackground: \(isVideoBackground)")
             await MainActor.run {
                 exportProgress = 0.1
             }
@@ -3369,19 +3380,48 @@ struct CollageEditorView: View {
             let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(videoName)
             print("🎬 Step 3: Creating video at: \(videoURL.lastPathComponent)")
             
-            // Export as MP4 video with music metadata overlay
-            try await MP4VideoExporter.export(
-                image: collageImage,
-                audioURL: audioURL,
-                duration: duration,
-                outputURL: videoURL,
-                musicMetadata: project.musicMetadata,
-                progress: { progressValue in
-                    DispatchQueue.main.async {
-                        exportProgress = 0.2 + (progressValue * 0.8) // Scale to 0.2-1.0
+            if isVideoBackground {
+                // Video background — composite the actual playing video under the foreground
+                let bgVideoName = CollageRenderer.videoName(for: projectSnapshot.backgroundType)
+                guard let bgVideoURL = Bundle.main.url(forResource: bgVideoName, withExtension: "mp4") else {
+                    print("❌ Cannot find background video: \(bgVideoName).mp4")
+                    await MainActor.run {
+                        exportError = "Background video not found"
+                        showExportError = true
+                        isExporting = false
                     }
+                    return
                 }
-            )
+                
+                try await MP4VideoExporter.exportWithVideoBackground(
+                    backgroundVideoURL: bgVideoURL,
+                    overlayImage: collageImage,
+                    audioURL: audioURL,
+                    outputURL: videoURL,
+                    canvasSize: size,
+                    screenScale: scale,
+                    musicMetadata: project.musicMetadata,
+                    progress: { progressValue in
+                        DispatchQueue.main.async {
+                            exportProgress = 0.2 + (progressValue * 0.8)
+                        }
+                    }
+                )
+            } else {
+                // Static background — existing path
+                try await MP4VideoExporter.export(
+                    image: collageImage,
+                    audioURL: audioURL,
+                    duration: duration,
+                    outputURL: videoURL,
+                    musicMetadata: project.musicMetadata,
+                    progress: { progressValue in
+                        DispatchQueue.main.async {
+                            exportProgress = 0.2 + (progressValue * 0.8)
+                        }
+                    }
+                )
+            }
             
             guard FileManager.default.fileExists(atPath: videoURL.path) else {
                 print("❌ Video file was not created")

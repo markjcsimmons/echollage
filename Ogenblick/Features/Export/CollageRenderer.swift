@@ -17,20 +17,30 @@ enum CollageRenderer {
     }
     
     /// Render with explicit size/scale (safe to run off-main).
+    /// Set `skipBackground` to true to render only foreground layers on a transparent canvas
+    /// (used when compositing over a video background during export).
     static func render(
         project: Project,
         assetURLProvider: (String) -> URL?,
         canvasSize size: CGSize,
-        screenScale: CGFloat
+        screenScale: CGFloat,
+        skipBackground: Bool = false
     ) -> UIImage? {
         let scale: CGFloat = 1.0
         
-        print("🎨 Rendering at full screen: \(size), project canvas: \(project.canvasWidth)x\(project.canvasHeight)")
+        print("🎨 Rendering at full screen: \(size), project canvas: \(project.canvasWidth)x\(project.canvasHeight), skipBackground: \(skipBackground)")
         
-        let renderer = UIGraphicsImageRenderer(size: size)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = screenScale
+        format.opaque = !skipBackground
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
         return renderer.image { context in
             let ctx = context.cgContext
             
+            if skipBackground {
+                // Transparent background — foreground only for video compositing
+                ctx.clear(CGRect(origin: .zero, size: size))
+            } else {
             // Render background based on project backgroundType
             switch project.backgroundType {
             case .corkboard:
@@ -185,6 +195,7 @@ enum CollageRenderer {
                     print("🎬 Drew fallback black background for video: \(videoName)")
                 }
             }
+            } // end if !skipBackground
             
             // Image layers - render exactly as positioned in editor
             print("🎨 Rendering \(project.imageLayers.count) image layers")
@@ -283,7 +294,8 @@ enum CollageRenderer {
         project: Project,
         assetURLProvider: @escaping (String) -> URL?,
         canvasSize: CGSize,
-        screenScale: CGFloat
+        screenScale: CGFloat,
+        skipBackground: Bool = false
     ) async -> UIImage? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -291,7 +303,8 @@ enum CollageRenderer {
                     project: project,
                     assetURLProvider: assetURLProvider,
                     canvasSize: canvasSize,
-                    screenScale: screenScale
+                    screenScale: screenScale,
+                    skipBackground: skipBackground
                 )
                 continuation.resume(returning: image)
             }
@@ -432,8 +445,7 @@ enum CollageRenderer {
         return nil
     }
     
-    // Helper function to get video filename for background type
-    private static func videoName(for backgroundType: BackgroundType) -> String {
+    static func videoName(for backgroundType: BackgroundType) -> String {
         switch backgroundType {
         case .fireworks: return "fireworks"
         case .mountains: return "mountains"
