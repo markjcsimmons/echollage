@@ -71,6 +71,7 @@
 		4D692B032EF4C00600FB2D3B /* Algorithms in Frameworks */ = {isa = PBXBuildFile; productRef = 4D692AF72EF4984500FB2D3B /* Algorithms */; };
 		4D692B052EF4C00800FB2D3B /* AnalyticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D692B062EF4C00900FB2D3B /* AnalyticsService.swift */; };
 		4D692B072EF4C00A00FB2D3B /* UserIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D692B082EF4C00B00FB2D3B /* UserIdentity.swift */; };
+		4D692B0B2EF4C00E00FB2D3B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 4D692B0C2EF4C00F00FB2D3B /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -138,6 +139,7 @@
 		4D692B062EF4C00900FB2D3B /* AnalyticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalyticsService.swift; sourceTree = "<group>"; };
 		4D692B082EF4C00B00FB2D3B /* UserIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserIdentity.swift; sourceTree = "<group>"; };
 		4D692B092EF4C00C00FB2D3B /* Ogenblick.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Ogenblick.entitlements; sourceTree = "<group>"; };
+		4D692B0C2EF4C00F00FB2D3B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -205,6 +207,7 @@
 				3757FC86DFEBF6DFB9D0B3A8 /* Secrets.plist */,
 				FEED42D3239CD6CE1F8B92A3 /* Secrets.sample.plist */,
 				4D692AF42EF4970400FB2D3B /* GoogleService-Info.plist */,
+				4D692B0C2EF4C00F00FB2D3B /* PrivacyInfo.xcprivacy */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -468,6 +471,7 @@
 				4A5B6C7D8E9F0A1B2C3D4E5F /* 214784_tiny.mp4 in Resources */,
 				8E9F0A1B2C3D4E5F6A7B8C9D /* 305858_medium.mp4 in Resources */,
 				0A1B2C3D4E5F6A7B8C9D0E1F /* 310961_small.mp4 in Resources */,
+				4D692B0B2EF4C00E00FB2D3B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
