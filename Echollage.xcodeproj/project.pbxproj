@@ -553,7 +553,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = Ogenblick/Ogenblick.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				"CURRENT_PROJECT_VERSION[sdk=*]" = 11;
+				"CURRENT_PROJECT_VERSION[sdk=*]" = 13;
 				INFOPLIST_FILE = Ogenblick/Resources/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
 				LD_RUNPATH_SEARCH_PATHS = (
