@@ -30,7 +30,7 @@ class MP4VideoExporter {
         }
 
         items.append(item(.quickTimeMetadataContentIdentifier, UUID().uuidString))
-        items.append(item(.quickTimeMetadataCreator, UserIdentity.shared.id))
+        items.append(item(.quickTimeMetadataAuthor, UserIdentity.shared.id))
         items.append(item(.commonIdentifierTitle, projectName))
         items.append(item(.quickTimeMetadataSoftware, "Echollage"))
 
@@ -524,7 +524,7 @@ class MP4VideoExporter {
             textStyle.lineBreakMode = .byWordWrapping // Enable word wrapping for multi-line text
             
             // App name (always shown)
-            let appName = "Échollage"
+            let appName = "echollage.com"
             let appNameAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: hasMusic ? 12 : 16, weight: .medium),
                 .foregroundColor: UIColor.white.withAlphaComponent(hasMusic ? 0.8 : 1.0),

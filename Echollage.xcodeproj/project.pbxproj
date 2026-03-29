@@ -65,6 +65,12 @@
 		F889A7D1ACE098EC360AC7D3 /* AudioRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72BA70624CC4E6592A46D72 /* AudioRecorder.swift */; };
 		FB30E5A66DFEE8409F9AA391 /* TearableImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 938C0C559A1FB7388E28EF64 /* TearableImageView.swift */; };
 		FD8AFB68277E4EC9DAAC13FC /* SoundEffectPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8351873824F8D02717F5CBD4 /* SoundEffectPlayer.swift */; };
+		4D692B002EF4C00300FB2D3B /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = 4D692AFD2EF4C00000FB2D3B /* FirebaseAnalytics */; };
+		4D692B012EF4C00400FB2D3B /* FirebaseCrashlytics in Frameworks */ = {isa = PBXBuildFile; productRef = 4D692AFE2EF4C00100FB2D3B /* FirebaseCrashlytics */; };
+		4D692B022EF4C00500FB2D3B /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = 4D692AFF2EF4C00200FB2D3B /* FirebaseMessaging */; };
+		4D692B032EF4C00600FB2D3B /* Algorithms in Frameworks */ = {isa = PBXBuildFile; productRef = 4D692AF72EF4984500FB2D3B /* Algorithms */; };
+		4D692B052EF4C00800FB2D3B /* AnalyticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D692B062EF4C00900FB2D3B /* AnalyticsService.swift */; };
+		4D692B072EF4C00A00FB2D3B /* UserIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D692B082EF4C00B00FB2D3B /* UserIdentity.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -129,7 +135,24 @@
 		FBBFF8EF4CF597C97052DFC4 /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
 		FD423AAC072D139F09F05BF2 /* TearOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TearOverlay.swift; sourceTree = "<group>"; };
 		FEED42D3239CD6CE1F8B92A3 /* Secrets.sample.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Secrets.sample.plist; sourceTree = "<group>"; };
+		4D692B062EF4C00900FB2D3B /* AnalyticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalyticsService.swift; sourceTree = "<group>"; };
+		4D692B082EF4C00B00FB2D3B /* UserIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserIdentity.swift; sourceTree = "<group>"; };
+		4D692B092EF4C00C00FB2D3B /* Ogenblick.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Ogenblick.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4D692B042EF4C00700FB2D3B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4D692B032EF4C00600FB2D3B /* Algorithms in Frameworks */,
+				4D692B002EF4C00300FB2D3B /* FirebaseAnalytics in Frameworks */,
+				4D692B012EF4C00400FB2D3B /* FirebaseCrashlytics in Frameworks */,
+				4D692B022EF4C00500FB2D3B /* FirebaseMessaging in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		0196C9318911498EE6A9FE5D /* Audio */ = {
@@ -219,6 +242,8 @@
 			isa = PBXGroup;
 			children = (
 				D056F039E82F457A9B85AD15 /* OgenblickApp.swift */,
+				4D692B082EF4C00B00FB2D3B /* UserIdentity.swift */,
+				4D692B092EF4C00C00FB2D3B /* Ogenblick.entitlements */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -289,11 +314,20 @@
 			path = Drawing;
 			sourceTree = "<group>";
 		};
+		4D692B0A2EF4C00D00FB2D3B /* Analytics */ = {
+			isa = PBXGroup;
+			children = (
+				4D692B062EF4C00900FB2D3B /* AnalyticsService.swift */,
+			);
+			path = Analytics;
+			sourceTree = "<group>";
+		};
 		AB8C92DF3106661D0C98B113 /* Features */ = {
 			isa = PBXGroup;
 			children = (
 				4D692AF92EF4B44F00FB2D3B /* Logger.swift */,
 				63C19DD9FD7BB2C05E894CDF /* ACRCloud */,
+				4D692B0A2EF4C00D00FB2D3B /* Analytics */,
 				0196C9318911498EE6A9FE5D /* Audio */,
 				0DF0BBC24CA57AB1D2782F54 /* Editor */,
 				62E0DE7E8E99AFD6FEEB44B7 /* Export */,
@@ -359,6 +393,7 @@
 			buildConfigurationList = 20EBFDD18506EEF7A31B0951 /* Build configuration list for PBXNativeTarget "Echollage" */;
 			buildPhases = (
 				FA146E4F0FBD92412E72C6D0 /* Sources */,
+				4D692B042EF4C00700FB2D3B /* Frameworks */,
 				95968102ADE7B060D235BA00 /* Resources */,
 				4D692AFC2EF4B6FE00FB2D3B /* Upload dSYMs */,
 			);
@@ -504,6 +539,8 @@
 				FD8AFB68277E4EC9DAAC13FC /* SoundEffectPlayer.swift in Sources */,
 				8318201AA13A42B3AED18D34 /* TearOverlay.swift in Sources */,
 				FB30E5A66DFEE8409F9AA391 /* TearableImageView.swift in Sources */,
+				4D692B052EF4C00800FB2D3B /* AnalyticsService.swift in Sources */,
+				4D692B072EF4C00A00FB2D3B /* UserIdentity.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
