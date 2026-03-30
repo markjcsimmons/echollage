@@ -257,13 +257,17 @@ enum CollageRenderer {
                 ctx.rotate(by: CGFloat(layer.transform.rotation))
                 ctx.scaleBy(x: CGFloat(layer.transform.scale), y: CGFloat(layer.transform.scale))
                 
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.alignment = .center
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: UIFont(name: layer.fontName, size: CGFloat(layer.fontSize) * scale) ?? UIFont.systemFont(ofSize: CGFloat(layer.fontSize) * scale),
-                    .foregroundColor: UIColor(hexString: layer.hexColor) ?? UIColor.white
+                    .foregroundColor: UIColor(hexString: layer.hexColor) ?? UIColor.white,
+                    .paragraphStyle: paragraphStyle
                 ]
                 let attrString = NSAttributedString(string: layer.text, attributes: attributes)
                 let textSize = attrString.size()
-                attrString.draw(at: CGPoint(x: -textSize.width / 2, y: -textSize.height / 2))
+                let drawRect = CGRect(x: -textSize.width / 2, y: -textSize.height / 2, width: textSize.width, height: textSize.height)
+                attrString.draw(in: drawRect)
                 
                 ctx.restoreGState()
             }

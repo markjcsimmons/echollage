@@ -6,7 +6,7 @@ struct PencilKitView: UIViewRepresentable {
     var isDrawingEnabled: Bool
     var isEraseMode: Bool = false
     var strokeColor: Color = .white
-    var strokeWidth: CGFloat = 8
+    var strokeWidth: CGFloat = 15
     var expectedSize: CGSize? = nil // Optional expected size for bounds matching
     var onDrawingChanged: ((Data) -> Void)?
     var onTapOnly: (() -> Void)? = nil // Callback when user taps (not draws) to deselect paint tool

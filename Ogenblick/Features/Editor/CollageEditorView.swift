@@ -30,7 +30,7 @@ struct CollageEditorView: View {
     @State private var showImageSourcePicker = false
     @State private var isDrawing: Bool = false // Canvas-wide drawing mode (toggled by paint button)
     @State private var selectedTool: DrawingTool = .pen
-    @State private var strokeWidth: CGFloat = 8 // Default to "Medium"
+    @State private var strokeWidth: CGFloat = 15
     @State private var strokeColor: Color = .white
     @State private var showFullToolset = false
     @State private var selectedImageId: UUID? = nil
@@ -4153,6 +4153,7 @@ private struct TransformableText: View {
         Text(text)
             .font(.custom(fontName, size: CGFloat(fontSize)))
             .foregroundStyle(color)
+            .multilineTextAlignment(.center)
             .padding(8)
             .background(Color.black.opacity(0.3))
             .cornerRadius(6)
