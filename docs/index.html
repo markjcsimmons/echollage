@@ -71,8 +71,27 @@
             color: rgba(255, 255, 255, 0.85);
             text-align: center;
             line-height: 1.5;
-            margin-bottom: 48px;
+            margin-bottom: 28px;
             max-width: 360px;
+        }
+
+        /* Above-fold CTA */
+        .cta-top {
+            display: inline-block;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 14px;
+            text-decoration: none;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 8px 20px;
+            border-radius: 20px;
+            margin-bottom: 48px;
+            transition: all 0.2s;
+        }
+
+        .cta-top:hover {
+            color: #fff;
+            border-color: rgba(255, 255, 255, 0.5);
+            background: rgba(255, 255, 255, 0.05);
         }
 
         .steps {
@@ -117,6 +136,67 @@
             line-height: 1.45;
         }
 
+        /* Screenshots */
+        .screenshots-section {
+            width: 100vw;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+            margin-bottom: 48px;
+            padding: 16px 0 24px;
+        }
+
+        .screenshots-section::-webkit-scrollbar {
+            display: none;
+        }
+
+        .screenshots-track {
+            display: flex;
+            gap: 16px;
+            padding: 0 32px;
+            width: max-content;
+        }
+
+        .screenshot-frame {
+            flex-shrink: 0;
+            width: 180px;
+            border-radius: 28px;
+            overflow: hidden;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .screenshot-frame img {
+            width: 100%;
+            display: block;
+        }
+
+        /* Feature pills */
+        .features {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+            margin-bottom: 40px;
+        }
+
+        .feature-pill {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.85);
+        }
+
+        .feature-pill .icon {
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
         .app-store-badge {
             display: inline-block;
             transition: opacity 0.2s;
@@ -144,7 +224,9 @@
 
         <h1>Échollage</h1>
 
-        <p class="tagline">Every sound carries a place, a feeling, a moment. Échollage wraps images around the sounds you capture, turning a fleeting moment into a collage you can hold onto and share.</p>
+        <p class="tagline">Every sound carries a place, a feeling, a moment. Wrap images around the sounds you capture and share something worth keeping.</p>
+
+        <a href="https://apps.apple.com/app/id6755980030" class="cta-top">Download free on the App Store →</a>
 
         <div class="steps">
             <div class="step">
@@ -167,6 +249,41 @@
                     <h3>Share the moment</h3>
                     <p>Export a living video that plays back exactly as you remember it.</p>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Screenshots — full width, outside container -->
+    <div class="screenshots-section">
+        <div class="screenshots-track">
+            <div class="screenshot-frame">
+                <img src="screenshots/screen3.png" alt="Échollage home screen">
+            </div>
+            <div class="screenshot-frame">
+                <img src="screenshots/screen1.png" alt="Music recognition">
+            </div>
+            <div class="screenshot-frame">
+                <img src="screenshots/screen2.png" alt="Collage editor">
+            </div>
+            <div class="screenshot-frame">
+                <img src="screenshots/screen4.png" alt="Corkboard collage">
+            </div>
+        </div>
+    </div>
+
+    <div class="container" style="padding-top: 0;">
+        <div class="features">
+            <div class="feature-pill">
+                <span class="icon">🎵</span>
+                Identifies the song playing automatically
+            </div>
+            <div class="feature-pill">
+                <span class="icon">🖼️</span>
+                Draw, write and layer photos into a collage
+            </div>
+            <div class="feature-pill">
+                <span class="icon">🎬</span>
+                Export and share as a video
             </div>
         </div>
 
